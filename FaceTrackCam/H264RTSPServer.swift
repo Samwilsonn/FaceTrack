@@ -11,6 +11,7 @@ final class H264RTSPServer {
         var playing = false
         var awaitingKeyframe = true
         var sending = false
+        var videoSendStarted: Date?
         var sequence = UInt16.random(in: 0...UInt16.max)
         var audioSequence = UInt16.random(in: 0...UInt16.max)
         var audioSending = false
@@ -86,10 +87,15 @@ final class H264RTSPServer {
             guard let self else { return }
             self.deliveryGate.lock()
             self.audioAllowed = false
+            self.audioFrames.removeAll()
             self.deliveryGate.unlock()
             self.queue.async {
                 self.microphoneEnabled = false
                 self.updateAudioCapture()
+                // A client with an advertised audio track cannot renegotiate
+                // it mid-session. Reconnect it with video-only SDP instead.
+                let audioClients = self.clients.filter { $0.value.audioChannel != nil }.map(\.key)
+                audioClients.forEach { self.remove($0) }
                 self.report(message)
                 DispatchQueue.main.async { self.onMicrophoneFailure?() }
             }
@@ -134,7 +140,7 @@ final class H264RTSPServer {
                 listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
                 listener.start(queue: self.queue)
                 let timer = DispatchSource.makeTimerSource(queue: self.queue)
-                timer.schedule(deadline: .now() + 5, repeating: 5)
+                timer.schedule(deadline: .now() + 1, repeating: 1)
                 timer.setEventHandler { [weak self] in self?.expireClients() }
                 timer.resume(); self.timer = timer
             } catch { self.reportStatus(false, error: "RTSP server could not start: \(error.localizedDescription)") }
@@ -306,10 +312,11 @@ final class H264RTSPServer {
                     ssrc: ssrc, channel: client.videoChannel!, marker: index == frame.nalUnits.count - 1))
             }
             client.sending = true
+            client.videoSendStarted = Date()
             client.connection.send(content: packet, completion: .contentProcessed { [weak self, weak client] error in
                 guard let self, let client, self.clients[id] === client else { return }
                 if error != nil { self.remove(id) }
-                else { client.sending = false; client.lastProgress = Date() }
+                else { client.sending = false; client.videoSendStarted = nil; client.lastProgress = Date() }
             })
         }
     }
@@ -365,7 +372,12 @@ final class H264RTSPServer {
     }
 
     private func expireClients() {
-        let expired = clients.filter { Date().timeIntervalSince($0.value.lastProgress) > 20 }.map(\.key)
+        let now = Date()
+        let expired = clients.filter { entry in
+            let client = entry.value
+            return now.timeIntervalSince(client.lastProgress) > 6 ||
+                (client.videoSendStarted.map { now.timeIntervalSince($0) > 2 } ?? false)
+        }.map(\.key)
         expired.forEach(remove)
     }
 

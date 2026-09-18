@@ -43,15 +43,17 @@ final class MicrophoneAAC {
                     return
                 }
                 converter.bitRate = 96_000
-                guard output.sampleRate == 48_000, output.channelCount == 1,
-                      output.streamDescription.pointee.mFormatID == kAudioFormatMPEG4AAC,
-                      output.streamDescription.pointee.mFramesPerPacket > 0 else {
-                    self.onError?("Microphone AAC output does not match the stream format.")
+                let description = converter.outputFormat.streamDescription.pointee
+                guard description.mSampleRate == 48_000, description.mChannelsPerFrame == 1,
+                      description.mFormatID == kAudioFormatMPEG4AAC else {
+                    self.onError?("Microphone AAC format is \(description.mSampleRate) Hz, \(description.mChannelsPerFrame) channels, codec \(description.mFormatID); expected AAC-LC 48000 Hz mono.")
                     return
                 }
                 self.converter = converter
                 self.outputFormat = output
-                self.framesPerPacket = output.streamDescription.pointee.mFramesPerPacket
+                // AVAudioFormat(settings:) may leave this ASBD field unspecified.
+                // AAC-LC access units contain 1024 PCM frames (Core Audio format spec).
+                self.framesPerPacket = description.mFramesPerPacket == 0 ? 1024 : description.mFramesPerPacket
                 self.nextTimestamp = UInt32(truncatingIfNeeded: Int64(ProcessInfo.processInfo.systemUptime * 48_000))
                 self.hasTimestamp = false
                 let generation = self.generation

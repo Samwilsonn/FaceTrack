@@ -194,7 +194,7 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
         guard enabled else {
             microphoneEnabled = false
             rtsp.setMicrophoneEnabled(false)
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            if !streaming { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
             return
         }
         switch AVAudioSession.sharedInstance().recordPermission {
