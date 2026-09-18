@@ -19,7 +19,7 @@ private enum RemotePanel: String, CaseIterable, Identifiable {
 private struct RemoteItem: Identifiable {
     let id: String
     let name: String
-    let thumbnail: UIImage? = nil
+    let thumbnail: UIImage?
 }
 
 struct RemoteScreen: View {
