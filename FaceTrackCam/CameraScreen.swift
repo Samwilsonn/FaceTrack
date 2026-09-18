@@ -84,6 +84,7 @@ struct CameraScreen: View {
                 Spacer(minLength: 0)
                 if let panel {
                     panelContent(panel).padding(.horizontal, panel == .settings ? 0 : 24)
+                        .padding(.bottom, panel == .background ? 14 : 0)
                         .opacity(camera.streaming ? 0.55 : 1)
                         .transition(.asymmetric(insertion: .scale(scale: 0.95, anchor: .bottom).combined(with: .opacity), removal: .scale(scale: 0.95, anchor: .bottom).combined(with: .opacity)))
                 }

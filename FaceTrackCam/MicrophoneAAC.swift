@@ -20,6 +20,8 @@ final class MicrophoneAAC {
     private var converter: AVAudioConverter?
     private var outputFormat: AVAudioFormat?
     private var nextTimestamp: UInt32 = 0
+    private var hasTimestamp = false
+    private var framesPerPacket: UInt32 = 0
 
     func start() {
         queue.async {
@@ -41,9 +43,17 @@ final class MicrophoneAAC {
                     return
                 }
                 converter.bitRate = 96_000
+                guard output.sampleRate == 48_000, output.channelCount == 1,
+                      output.streamDescription.pointee.mFormatID == kAudioFormatMPEG4AAC,
+                      output.streamDescription.pointee.mFramesPerPacket > 0 else {
+                    self.onError?("Microphone AAC output does not match the stream format.")
+                    return
+                }
                 self.converter = converter
                 self.outputFormat = output
+                self.framesPerPacket = output.streamDescription.pointee.mFramesPerPacket
                 self.nextTimestamp = UInt32(truncatingIfNeeded: Int64(ProcessInfo.processInfo.systemUptime * 48_000))
+                self.hasTimestamp = false
                 let generation = self.generation
                 input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, time in
                     self?.accept(buffer, time: time, generation: generation)
@@ -105,25 +115,39 @@ final class MicrophoneAAC {
 
     private func encode(_ pcm: AVAudioPCMBuffer, timestamp: UInt32, generation: Int) {
         guard self.generation == generation, let converter, let outputFormat else { return }
-        let compressed = AVAudioCompressedBuffer(format: outputFormat, packetCapacity: 1, maximumPacketSize: 4096)
         var supplied = false
-        var conversionError: NSError?
-        let status = converter.convert(to: compressed, error: &conversionError) { _, inputStatus in
-            if supplied { inputStatus.pointee = .noDataNow; return nil }
-            supplied = true
-            inputStatus.pointee = .haveData
-            return pcm
+        // A resampler can produce more than one AAC access unit from one tap.
+        // Drain it so the converter cannot accumulate old microphone samples.
+        for _ in 0..<8 {
+            let compressed = AVAudioCompressedBuffer(format: outputFormat, packetCapacity: 1,
+                                                     maximumPacketSize: max(4096, converter.maximumOutputPacketSize))
+            var conversionError: NSError?
+            let status = converter.convert(to: compressed, error: &conversionError) { _, inputStatus in
+                if supplied { inputStatus.pointee = .noDataNow; return nil }
+                supplied = true
+                inputStatus.pointee = .haveData
+                return pcm
+            }
+            if let conversionError {
+                onError?("Microphone AAC encoding failed: \(conversionError.localizedDescription)")
+                return
+            }
+            guard status != .error else { onError?("Microphone AAC encoding failed."); return }
+            guard compressed.packetCount > 0, compressed.byteLength > 0 else { return }
+            let offset = compressed.packetDescriptions.map { Int($0[0].mStartOffset) } ?? 0
+            let size = compressed.packetDescriptions.map { Int($0[0].mDataByteSize) } ?? Int(compressed.byteLength)
+            guard offset >= 0, size > 0, offset + size <= Int(compressed.byteLength) else {
+                onError?("Microphone AAC packet boundary is invalid.")
+                return
+            }
+            if !hasTimestamp || Int32(bitPattern: timestamp &- nextTimestamp) > 12_000 {
+                nextTimestamp = timestamp
+                hasTimestamp = true
+            }
+            let data = Data(bytes: compressed.data.advanced(by: offset), count: size)
+            onFrame?(Frame(data: data, timestamp: nextTimestamp))
+            nextTimestamp &+= framesPerPacket
+            if status != .haveData { return }
         }
-        if let conversionError {
-            onError?("Microphone AAC encoding failed: \(conversionError.localizedDescription)")
-            return
-        }
-        guard status != .error, compressed.packetCount > 0, compressed.byteLength > 0 else { return }
-        // One AAC access unit is emitted per RTP packet. AVAudioConverter can
-        // buffer input; timestamps advance by the AAC-LC frame size on output.
-        let data = Data(bytes: compressed.data, count: Int(compressed.byteLength))
-        if Int32(bitPattern: timestamp &- nextTimestamp) > 1024 { nextTimestamp = timestamp }
-        onFrame?(Frame(data: data, timestamp: nextTimestamp))
-        nextTimestamp &+= 1024
     }
 }

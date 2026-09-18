@@ -8,6 +8,7 @@ extension CameraModel {
          "exposure": exposure, "exposureLocked": exposureLocked, "temperature": whiteBalanceTemperature,
          "whiteBalanceLocked": whiteBalanceLocked, "background": settings.background.rawValue, "mirror": settings.mirrorStream,
          "microphone": microphoneEnabled,
+         "hasRecentBackgrounds": !recentBackgroundIDs.isEmpty,
          "selectedBackground": selectedBackgroundID?.uuidString ?? "",
          "cameras": cameras.map { ["id": $0.id, "name": $0.name] },
          "qualities": VideoQuality.allCases.map { ["id": $0.rawValue, "name": $0.label] },
@@ -49,6 +50,7 @@ extension CameraModel {
         case "subject": guard let mode = SubjectMode(rawValue: value) else { return "Unknown mode" }; settings.subjectMode = mode
         case "background": guard let mode = BackgroundMode(rawValue: value), mode != .custom else { return "Choose a saved background" }; setBackgroundMode(mode)
         case "asset": guard let asset = backgrounds.first(where: { $0.id.uuidString == value }) else { return "Unknown background" }; selectBackground(asset)
+        case "clearRecentBackgrounds": clearRecentBackgrounds()
         case "uploadBackground":
             guard let data = Data(base64Encoded: value), data.count <= 8_000_000 else { return "Invalid background image" }
             loadBackground(data)

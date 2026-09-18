@@ -16,6 +16,7 @@ final class H264RTSPServer {
         var audioSending = false
         var videoChannel: UInt8?
         var audioChannel: UInt8?
+        var audioOffered = false
         var lastProgress = Date()
         let sessionID = UUID().uuidString
         init(_ connection: NWConnection) { self.connection = connection }
@@ -30,9 +31,11 @@ final class H264RTSPServer {
     private let deliveryGate = NSLock()
     private var deliveryPending = false
     private var deliveryDropped = false
-    private var audioDeliveryPending = false
+    private var audioDeliveryQueued = false
+    private var audioFrames: [MicrophoneAAC.Frame] = []
     private var audioAllowed = false
     private var hasViewers = false
+    private var latestVideoTimestamp: UInt32?
     private var listener: NWListener?
     private var clients: [UUID: Client] = [:]
     private var timer: DispatchSourceTimer?
@@ -71,15 +74,13 @@ final class H264RTSPServer {
         microphone.onFrame = { [weak self] frame in
             guard let self else { return }
             self.deliveryGate.lock()
-            guard !self.audioDeliveryPending else { self.deliveryGate.unlock(); return }
-            self.audioDeliveryPending = true
+            guard self.audioAllowed else { self.deliveryGate.unlock(); return }
+            if self.audioFrames.count == 4 { self.audioFrames.removeFirst() }
+            self.audioFrames.append(frame)
+            guard !self.audioDeliveryQueued else { self.deliveryGate.unlock(); return }
+            self.audioDeliveryQueued = true
             self.deliveryGate.unlock()
-            self.queue.async {
-                self.sendAudio(frame)
-                self.deliveryGate.lock()
-                self.audioDeliveryPending = false
-                self.deliveryGate.unlock()
-            }
+            self.queue.async { self.drainAudio() }
         }
         microphone.onError = { [weak self] message in
             guard let self else { return }
@@ -100,6 +101,7 @@ final class H264RTSPServer {
     func setMicrophoneEnabled(_ enabled: Bool) {
         deliveryGate.lock()
         audioAllowed = enabled
+        if !enabled { audioFrames.removeAll() }
         deliveryGate.unlock()
         queue.async {
             self.microphoneEnabled = enabled
@@ -142,7 +144,12 @@ final class H264RTSPServer {
     func stop() { queue.async { self.stopInternal() } }
 
     func offer(_ image: CIImage, time: CMTime) {
-        deliveryGate.lock(); let needed = hasViewers; deliveryGate.unlock()
+        deliveryGate.lock()
+        let needed = hasViewers
+        if needed && time.isValid {
+            latestVideoTimestamp = UInt32(truncatingIfNeeded: Int64((time.seconds * 90_000).rounded()))
+        }
+        deliveryGate.unlock()
         guard needed else { return }
         encoder.offer(image, time: time)
     }
@@ -150,6 +157,10 @@ final class H264RTSPServer {
     private func stopInternal() {
         let hadListener = listener != nil
         running = false
+        deliveryGate.lock()
+        audioFrames.removeAll()
+        latestVideoTimestamp = nil
+        deliveryGate.unlock()
         listener?.stateUpdateHandler = nil
         listener?.newConnectionHandler = nil
         listener?.cancel(); listener = nil
@@ -228,7 +239,11 @@ final class H264RTSPServer {
             guard url.path == "/facepull" else { reply(id, cseq: cseq, status: "400 Bad Request"); return }
             let videoControl = uri.replacingOccurrences(of: "?token=", with: "/trackID=0?token=")
             let audioControl = uri.replacingOccurrences(of: "?token=", with: "/trackID=1?token=")
-            let sdp = "v=0\r\no=FacePull 0 0 IN IP4 127.0.0.1\r\ns=FacePull\r\nt=0 0\r\na=control:*\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\na=control:\(videoControl)\r\nm=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/48000/1\r\na=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;config=1188;SizeLength=13;IndexLength=3;IndexDeltaLength=3\r\na=control:\(audioControl)\r\n"
+            client.audioOffered = microphoneEnabled
+            var sdp = "v=0\r\no=FacePull 0 0 IN IP4 127.0.0.1\r\ns=FacePull\r\nt=0 0\r\na=control:*\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\na=control:\(videoControl)\r\n"
+            if client.audioOffered {
+                sdp += "m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/48000/1\r\na=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;config=1188;SizeLength=13;IndexLength=3;IndexDeltaLength=3\r\na=control:\(audioControl)\r\n"
+            }
             reply(id, cseq: cseq, extra: "Content-Base: \(uri)\r\nContent-Type: application/sdp\r\n", body: sdp)
         case "SETUP":
             let transport = lines.first(where: { $0.lowercased().hasPrefix("transport:") })?.lowercased() ?? ""
@@ -236,7 +251,7 @@ final class H264RTSPServer {
                 reply(id, cseq: cseq, status: "461 Unsupported Transport"); return
             }
             let isAudio = url.path == "/facepull/trackID=1"
-            guard url.path != "/facepull",
+            guard url.path != "/facepull", (!isAudio || client.audioOffered),
                   let channelText = transport.components(separatedBy: "interleaved=").dropFirst().first?.split(separator: ";").first,
                   let first = UInt8(channelText.split(separator: "-").first ?? ""), first <= 252,
                   channelText == "\(first)-\(first + 1)", first.isMultiple(of: 2),
@@ -273,6 +288,14 @@ final class H264RTSPServer {
 
     private func send(_ frame: H264Encoder.Frame) {
         guard running else { return }
+        deliveryGate.lock()
+        let latest = latestVideoTimestamp
+        deliveryGate.unlock()
+        if let latest, Int32(bitPattern: latest &- frame.timestamp) > 45_000 {
+            clients.values.forEach { $0.awaitingKeyframe = true }
+            encoder.requestKeyframe()
+            return
+        }
         for (id, client) in clients where client.playing && client.videoChannel != nil {
             if client.sending { client.awaitingKeyframe = true; continue }
             if client.awaitingKeyframe && !frame.isKeyframe { continue }
@@ -289,6 +312,22 @@ final class H264RTSPServer {
                 else { client.sending = false; client.lastProgress = Date() }
             })
         }
+    }
+
+    private func drainAudio() {
+        for _ in 0..<4 {
+            deliveryGate.lock()
+            guard !audioFrames.isEmpty else {
+                audioDeliveryQueued = false
+                deliveryGate.unlock()
+                return
+            }
+            let frame = audioFrames.removeFirst()
+            deliveryGate.unlock()
+            sendAudio(frame)
+        }
+        // Yield to queued video work instead of letting busy audio starve it.
+        queue.async { self.drainAudio() }
     }
 
     private func sendAudio(_ frame: MicrophoneAAC.Frame) {

@@ -77,6 +77,7 @@ struct RemoteScreen: View {
             .padding(16)
         }
         .preferredColorScheme(.dark)
+        .buttonStyle(LiquidGlassButtonStyle())
         .photosPicker(isPresented: $showPhotoPicker, selection: $photo, matching: .images)
         .task(id: photo) {
             guard let photo, let data = try? await photo.loadTransferable(type: Data.self) else { return }
@@ -125,6 +126,8 @@ struct RemoteScreen: View {
                     choice("Portrait", selected: text("background") == "Blur") { peer.command("background", value: "Blur") }
                     Button("Photos", systemImage: "photo.badge.plus") { showPhotoPicker = true }
                 }
+                Button("Clear recents", role: .destructive) { peer.command("clearRecentBackgrounds") }
+                    .disabled(peer.state["hasRecentBackgrounds"] as? Bool != true)
                 ScrollView(.horizontal) {
                     HStack {
                         ForEach(items("backgrounds"), id: \.id) { item in
@@ -154,9 +157,9 @@ struct RemoteScreen: View {
                         }
                     } label: { row("Quality", value: text("quality"), icon: "video") }
                     Toggle("Mirror stream", isOn: Binding(get: { peer.state["mirror"] as? Bool ?? false },
-                        set: { peer.command("mirror", value: $0) })).tint(.blue).padding(12).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        set: { FaceTrackHaptics.tap(); peer.command("mirror", value: $0) })).tint(.blue).padding(12).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
                     Toggle("Microphone", isOn: Binding(get: { peer.state["microphone"] as? Bool ?? false },
-                        set: { peer.command("microphone", value: $0) })).tint(.blue).padding(12).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        set: { FaceTrackHaptics.tap(); peer.command("microphone", value: $0) })).tint(.blue).padding(12).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
                     ForEach(items("presets"), id: \.id) { item in
                         Button { peer.command("preset", value: item.id) } label: { row(item.name, value: "Apply", icon: "slider.horizontal.3") }
                     }
@@ -169,8 +172,7 @@ struct RemoteScreen: View {
                             range: ClosedRange<Float>, defaultValue: Float, step: Float) -> some View {
         HStack(spacing: 16) {
             Toggle(title, isOn: Binding(get: { peer.state[enabled] as? Bool ?? false },
-                set: { peer.command(enabled, value: $0) })).labelsHidden().tint(.blue)
-                .onChange(of: peer.state[enabled] as? Bool) { _, _ in FaceTrackHaptics.tap() }
+                set: { FaceTrackHaptics.tap(); peer.command(enabled, value: $0) })).labelsHidden().tint(.blue)
             NativeMagneticSlider(value: Binding(get: { (peer.state[action] as? NSNumber).map { Float(truncating: $0) } ?? defaultValue },
                 set: {
                     if action == "temperature" { peer.command("whiteBalanceLocked", value: true) }
