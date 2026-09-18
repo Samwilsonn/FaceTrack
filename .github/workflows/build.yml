@@ -16,7 +16,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Select available Xcode and verify modern iOS SDK
         run: |
-          if [ -d /Applications/Xcode_26.6.app ]; then sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer; fi
+          for version in 26.6 26.5 26.4.1 26.3 26.2 26.1.1 26.0.1; do
+            if [ -d "/Applications/Xcode_${version}.app" ]; then
+              sudo xcode-select -s "/Applications/Xcode_${version}.app/Contents/Developer"
+              break
+            fi
+          done
           xcodebuild -version
           SDK_VERSION=$(xcrun --sdk iphoneos --show-sdk-version)
           echo "iOS SDK: $SDK_VERSION"
@@ -63,3 +68,4 @@ jobs:
           path: |
             build.log
             simulator-build.log
+
