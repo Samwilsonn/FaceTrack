@@ -30,6 +30,7 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
     let remoteKey = CameraLibrary.stableSecret("remoteKey")
     @Published var connectionAlerts = true
     @Published private(set) var microphoneEnabled = false
+    private var microphoneRequest = 0
     @Published private(set) var backgrounds: [BackgroundAsset] = CameraLibrary.load("backgrounds.json", fallback: [])
     @Published private(set) var recentBackgroundIDs: [UUID] = CameraLibrary.load("recents.json", fallback: [])
     @Published private(set) var presets: [CameraPreset] = CameraLibrary.load("presets.json", fallback: [])
@@ -94,6 +95,7 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
         server.onRemoteCommand = { [weak self] command in self?.applyRemote(command) }
         peer.onCommand = { [weak self] command in self?.applyRemote(command) }
         rtsp.onError = { [weak self] message in self?.error = message }
+        rtsp.onMicrophoneFailure = { [weak self] in self?.setMicrophoneEnabled(false) }
         rtsp.onStatus = { [weak self] running, error in
             guard let self else { return }
             self.starting = false
@@ -136,6 +138,12 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
             guard let self else { return }
             self.ready = false; self.stopStream()
             self.error = (notification.userInfo?[AVCaptureSessionErrorKey] as? Error)?.localizedDescription ?? "Camera stopped. Tap Retry."
+        }
+        observe(AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance()) { [weak self] notification in
+            guard let self,
+                  let kind = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  kind == AVAudioSession.InterruptionType.began.rawValue else { return }
+            self.setMicrophoneEnabled(false)
         }
         updateMonitor()
     }
@@ -181,18 +189,40 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
     }
 
     func setMicrophoneEnabled(_ enabled: Bool) {
-        guard enabled else { microphoneEnabled = false; try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation); return }
+        microphoneRequest &+= 1
+        let request = microphoneRequest
+        guard enabled else {
+            microphoneEnabled = false
+            rtsp.setMicrophoneEnabled(false)
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            return
+        }
         switch AVAudioSession.sharedInstance().recordPermission {
         case .granted: enableMicrophoneSession()
-        case .undetermined: AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in DispatchQueue.main.async { if granted { self?.enableMicrophoneSession() } } }
-        case .denied: microphoneEnabled = false
-        @unknown default: microphoneEnabled = false
+        case .undetermined: AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+            DispatchQueue.main.async {
+                guard let self, self.microphoneRequest == request else { return }
+                if granted { self.enableMicrophoneSession() }
+                else { self.microphoneEnabled = false; self.rtsp.setMicrophoneEnabled(false) }
+            }
+        }
+        case .denied: microphoneEnabled = false; rtsp.setMicrophoneEnabled(false)
+        @unknown default: microphoneEnabled = false; rtsp.setMicrophoneEnabled(false)
         }
     }
 
     private func enableMicrophoneSession() {
-        do { let audio = AVAudioSession.sharedInstance(); try audio.setCategory(.record, mode: .videoRecording, options: [.allowBluetooth, .mixWithOthers]); try audio.setActive(true); microphoneEnabled = true }
-        catch { microphoneEnabled = false; report("Microphone could not be enabled.") }
+        do {
+            let audio = AVAudioSession.sharedInstance()
+            try audio.setCategory(.record, mode: .videoRecording, options: [.allowBluetooth, .mixWithOthers])
+            try audio.setActive(true)
+            microphoneEnabled = true
+            rtsp.setMicrophoneEnabled(true)
+        } catch {
+            microphoneEnabled = false
+            rtsp.setMicrophoneEnabled(false)
+            report("Microphone could not be enabled.")
+        }
     }
 
     func deactivate() {
