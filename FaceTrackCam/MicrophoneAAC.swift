@@ -1,5 +1,6 @@
 import AVFAudio
 import Foundation
+import CoreMedia
 
 /// Captures only while an RTSP audio consumer is active. The tap copies PCM and
 /// all conversion work runs on its own bounded queue, away from video capture.
@@ -7,6 +8,7 @@ final class MicrophoneAAC {
     struct Frame {
         let data: Data
         let timestamp: UInt32
+        let silent: Bool
     }
 
     var onFrame: ((Frame) -> Void)?
@@ -22,10 +24,48 @@ final class MicrophoneAAC {
     private var nextTimestamp: UInt32 = 0
     private var hasTimestamp = false
     private var framesPerPacket: UInt32 = 0
+    private var running = false
+    private var enabled = false
+    private var awaitingLive = false
+    private var silence: Data?
+    private var silenceTimer: DispatchSourceTimer?
+    private var lastEmittedTimestamp: UInt32?
+    private var compressedBuffer: AVAudioCompressedBuffer?
 
-    func start() {
+    func start(microphoneEnabled: Bool) {
         queue.async {
-            guard self.engine == nil else { return }
+            guard !self.running else { self.changeMicrophone(microphoneEnabled); return }
+            self.running = true
+            self.lastEmittedTimestamp = nil
+            if self.silence == nil { self.silence = Self.makeSilence() }
+            if self.silence == nil { self.onError?("AAC silence initialization failed; the reserved audio track cannot be kept active.") }
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now(), repeating: 1024.0 / 48_000.0, leeway: .milliseconds(1))
+            timer.setEventHandler { [weak self] in self?.sendSilence() }
+            self.silenceTimer = timer
+            timer.resume()
+            self.changeMicrophone(microphoneEnabled)
+        }
+    }
+
+    func setMicrophoneEnabled(_ enabled: Bool) {
+        queue.async { self.changeMicrophone(enabled) }
+    }
+
+    private func changeMicrophone(_ enabled: Bool) {
+        guard running else { return }
+        self.enabled = enabled
+        if enabled {
+            guard engine == nil else { return }
+            awaitingLive = true
+            startCapture()
+        } else {
+            stopCapture()
+            awaitingLive = false
+        }
+    }
+
+    private func startCapture() {
             do {
                 let engine = AVAudioEngine()
                 let input = engine.inputNode
@@ -51,6 +91,8 @@ final class MicrophoneAAC {
                 }
                 self.converter = converter
                 self.outputFormat = output
+                self.compressedBuffer = AVAudioCompressedBuffer(format: output, packetCapacity: 1,
+                    maximumPacketSize: max(4096, converter.maximumOutputPacketSize))
                 // AVAudioFormat(settings:) may leave this ASBD field unspecified.
                 // AAC-LC access units contain 1024 PCM frames (Core Audio format spec).
                 self.framesPerPacket = description.mFramesPerPacket == 0 ? 1024 : description.mFramesPerPacket
@@ -64,15 +106,21 @@ final class MicrophoneAAC {
                 engine.prepare()
                 try engine.start()
             } catch {
-                self.stopInternal()
+                self.stopCapture()
                 self.onError?("Microphone capture failed: \(error.localizedDescription)")
             }
+    }
+
+    func stop() {
+        queue.async {
+            self.running = false
+            self.silenceTimer?.cancel(); self.silenceTimer = nil
+            self.stopCapture()
+            self.lastEmittedTimestamp = nil
         }
     }
 
-    func stop() { queue.async { self.stopInternal() } }
-
-    private func stopInternal() {
+    private func stopCapture() {
         admission.lock()
         generation &+= 1
         pending = false
@@ -84,6 +132,7 @@ final class MicrophoneAAC {
         engine = nil
         converter = nil
         outputFormat = nil
+        compressedBuffer = nil
     }
 
     private func accept(_ buffer: AVAudioPCMBuffer, time: AVAudioTime, generation: Int) {
@@ -116,13 +165,13 @@ final class MicrophoneAAC {
     }
 
     private func encode(_ pcm: AVAudioPCMBuffer, timestamp: UInt32, generation: Int) {
-        guard self.generation == generation, let converter, let outputFormat else { return }
+        guard running, enabled, self.generation == generation, let converter, let compressed = compressedBuffer else { return }
         var supplied = false
         // A resampler can produce more than one AAC access unit from one tap.
         // Drain it so the converter cannot accumulate old microphone samples.
         for _ in 0..<8 {
-            let compressed = AVAudioCompressedBuffer(format: outputFormat, packetCapacity: 1,
-                                                     maximumPacketSize: max(4096, converter.maximumOutputPacketSize))
+            compressed.packetCount = 0
+            compressed.byteLength = 0
             var conversionError: NSError?
             let status = converter.convert(to: compressed, error: &conversionError) { _, inputStatus in
                 if supplied { inputStatus.pointee = .noDataNow; return nil }
@@ -147,9 +196,58 @@ final class MicrophoneAAC {
                 hasTimestamp = true
             }
             let data = Data(bytes: compressed.data.advanced(by: offset), count: size)
-            onFrame?(Frame(data: data, timestamp: nextTimestamp))
+            awaitingLive = false
+            emit(data, timestamp: nextTimestamp, silent: false)
             nextTimestamp &+= framesPerPacket
             if status != .haveData { return }
         }
+    }
+
+    private func emit(_ data: Data, timestamp: UInt32, silent: Bool) {
+        if let last = lastEmittedTimestamp, Int32(bitPattern: timestamp &- last) <= 0 { return }
+        lastEmittedTimestamp = timestamp
+        onFrame?(Frame(data: data, timestamp: timestamp, silent: silent))
+    }
+
+    private func sendSilence() {
+        guard running, !enabled || awaitingLive, let silence else { return }
+        let now = UInt32(truncatingIfNeeded: Int64(CMClockGetTime(CMClockGetHostTimeClock()).seconds * 48_000))
+        let next = lastEmittedTimestamp.map { $0 &+ 1024 } ?? now
+        guard Int32(bitPattern: now &- next) >= 0 else { return }
+        emit(silence, timestamp: Int32(bitPattern: now &- next) > 2048 ? now : next, silent: true)
+    }
+
+    // Encode once with the same AAC-LC/48 kHz/mono configuration as live audio.
+    // Muting stops microphone capture; only this cached silent AU keeps the
+    // negotiated RTSP track alive, so OBS never waits for a missing track.
+    private static func makeSilence() -> Data? {
+        guard let pcmFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1),
+              let pcm = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: 1024),
+              let output = AVAudioFormat(settings: [AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+                AVSampleRateKey: 48_000, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 96_000]),
+              let converter = AVAudioConverter(from: pcmFormat, to: output) else { return nil }
+        pcm.frameLength = 1024
+        pcm.floatChannelData?[0].initialize(repeating: 0, count: 1024)
+        converter.bitRate = 96_000
+        let compressed = AVAudioCompressedBuffer(format: output, packetCapacity: 1,
+                                                maximumPacketSize: max(4096, converter.maximumOutputPacketSize))
+        for _ in 0..<8 {
+            compressed.packetCount = 0
+            compressed.byteLength = 0
+            var supplied = false
+            var error: NSError?
+            let status = converter.convert(to: compressed, error: &error) { _, state in
+                if supplied { state.pointee = .noDataNow; return nil }
+                supplied = true; state.pointee = .haveData; return pcm
+            }
+            guard status != .error, error == nil else { return nil }
+            if compressed.packetCount > 0 {
+                let offset = compressed.packetDescriptions.map { Int($0[0].mStartOffset) } ?? 0
+                let count = compressed.packetDescriptions.map { Int($0[0].mDataByteSize) } ?? Int(compressed.byteLength)
+                guard offset >= 0, count > 0, offset + count <= Int(compressed.byteLength) else { return nil }
+                return Data(bytes: compressed.data.advanced(by: offset), count: count)
+            }
+        }
+        return nil
     }
 }

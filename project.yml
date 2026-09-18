@@ -13,9 +13,6 @@ targets:
     sources:
       - path: FaceTrackCam
       - path: Core
-      - path: Shared
-    dependencies:
-      - target: StreamActivity
     info:
       path: FaceTrackCam/Info.plist
       properties:
@@ -26,7 +23,7 @@ targets:
         NSLocalNetworkUsageDescription: "Stream to OBS and pair with another FacePull iPhone on your local network."
         NSBonjourServices:
           - _facepull._tcp
-        NSSupportsLiveActivities: true
+          - _facepull-video._tcp
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     settings:
@@ -49,27 +46,6 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: FaceTrackCam
-  StreamActivity:
-    type: app-extension
-    platform: iOS
-    deploymentTarget: "17.0"
-    sources:
-      - path: StreamActivity
-      - path: Shared
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.anmol.FaceTrackCam.StreamActivity
-        CURRENT_PROJECT_VERSION: "4"
-        MARKETING_VERSION: "2.2"
-        GENERATE_INFOPLIST_FILE: YES
-        SKIP_INSTALL: YES
-        TARGETED_DEVICE_FAMILY: "1,2"
-    info:
-      path: StreamActivity/Info.plist
-      properties:
-        CFBundleDisplayName: FacePull Live
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.widgetkit-extension
 schemes:
   FaceTrackCam:
     build:

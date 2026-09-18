@@ -25,6 +25,9 @@ private struct RemoteItem: Identifiable {
 struct RemoteScreen: View {
     @AppStorage("appMode") private var mode = "host"
     @StateObject private var peer = PeerControl(role: .remote)
+    @StateObject private var preview = RemotePreviewModel()
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var previewEnabled = false
     @State private var code = ""
     @State private var panel: RemotePanel?
     @State private var focusedPanel: RemotePanel?
@@ -43,7 +46,12 @@ struct RemoteScreen: View {
                 }.font(.subheadline.weight(.medium))
                 Spacer()
                 if peer.authorized {
-                    if let panel { controls(panel) }
+                    if previewEnabled && scenePhase == .active {
+                        RemotePreviewView(decoder: preview.decoder)
+                            .aspectRatio(16 / 9, contentMode: .fit)
+                            .overlay(alignment: .topLeading) { Text(preview.status).font(.caption).padding(8) }
+                    }
+                    if let panel { controls(panel).contentShape(Rectangle()).onTapGesture {} }
                     HStack(spacing: 8) {
                         ForEach(RemotePanel.allCases) { item in
                             Button { withAnimation(.interpolatingSpring(stiffness: 300, damping: 20)) {
@@ -78,12 +86,35 @@ struct RemoteScreen: View {
         }
         .preferredColorScheme(.dark)
         .buttonStyle(LiquidGlassButtonStyle())
+        .onChange(of: previewConfiguration) { syncPreview() }
+        .onChange(of: peer.authorized) { requestPreview() }
+        .onChange(of: scenePhase) { requestPreview() }
+        .onDisappear {
+            if peer.authorized { peer.command("livePreview", value: false) }
+            previewEnabled = false
+            preview.stop()
+        }
         .photosPicker(isPresented: $showPhotoPicker, selection: $photo, matching: .images)
         .task(id: photo) {
             guard let photo, let data = try? await photo.loadTransferable(type: Data.self) else { return }
             peer.command("uploadBackground", value: data.base64EncodedString())
             self.photo = nil
         }
+    }
+
+    private var previewConfiguration: String {
+        "\(peer.authorized)-\(peer.state["streaming"] as? Bool ?? false)-\(peer.state["livePreview"] as? Bool ?? false)-" + text("previewName") + text("previewToken")
+    }
+
+    private func requestPreview() {
+        if peer.authorized { peer.command("livePreview", value: previewEnabled && scenePhase == .active) }
+        syncPreview()
+    }
+
+    private func syncPreview() {
+        preview.configure(enabled: previewEnabled && peer.authorized && scenePhase == .active,
+                          host: text("previewName"), token: text("previewToken"),
+                          streaming: peer.state["streaming"] as? Bool == true && peer.state["livePreview"] as? Bool == true)
     }
 
     private var pairing: some View {
@@ -134,6 +165,7 @@ struct RemoteScreen: View {
                             Button { peer.command("asset", value: item.id) } label: {
                                 Group { if let image = item.thumbnail { Image(uiImage: image).resizable().scaledToFill() } else { Image(systemName: "photo") } }
                                     .frame(width: 80, height: 64).clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(text("selectedBackground") == item.id && text("background") == "Custom" ? Color.blue : Color.clear, lineWidth: 2))
                             }
                         }
                     }
@@ -146,6 +178,9 @@ struct RemoteScreen: View {
         case .settings:
             ScrollView {
                 VStack(spacing: 8) {
+                    Toggle("Live Preview", isOn: Binding(get: { previewEnabled }, set: {
+                        FaceTrackHaptics.tap(); previewEnabled = $0; requestPreview()
+                    })).tint(.blue).padding(12).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
                     Menu {
                         ForEach(items("cameras"), id: \.id) { item in
                             Button(item.name) { peer.command("lens", value: item.id) }

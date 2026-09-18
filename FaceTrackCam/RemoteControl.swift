@@ -2,7 +2,15 @@ import Foundation
 
 extension CameraModel {
     func remoteState() -> [String: Any] {
-        ["streaming": streaming, "fps": fps, "thermal": thermal, "viewers": viewers,
+        let visible = visibleBackgrounds
+        let ids = Set(backgrounds.map(\.id))
+        remoteThumbnailCache = remoteThumbnailCache.filter { ids.contains($0.key) }
+        for asset in visible where remoteThumbnailCache[asset.id] == nil {
+            remoteThumbnailCache[asset.id] = asset.thumbnail?.jpegData(compressionQuality: 0.65)?.base64EncodedString() ?? ""
+        }
+        return ["streaming": streaming, "fps": fps, "thermal": thermal, "viewers": viewers,
+         "livePreview": remotePreviewEnabled, "previewName": remotePreviewName,
+         "previewToken": peer.authorized ? remotePreviewToken : "",
          "lens": selectedCamera, "quality": settings.quality.rawValue, "tracking": settings.tracking,
          "intensity": Double(settings.intensity), "subject": settings.subjectMode.rawValue,
          "exposure": exposure, "exposureLocked": exposureLocked, "temperature": whiteBalanceTemperature,
@@ -13,8 +21,8 @@ extension CameraModel {
          "cameras": cameras.map { ["id": $0.id, "name": $0.name] },
          "qualities": VideoQuality.allCases.map { ["id": $0.rawValue, "name": $0.label] },
          "presets": presets.map { ["id": $0.id.uuidString, "name": $0.name] },
-         "backgrounds": visibleBackgrounds.map { asset in
-            ["id": asset.id.uuidString, "name": "Background", "thumb": asset.thumbnail?.jpegData(compressionQuality: 0.65)?.base64EncodedString() ?? ""]
+         "backgrounds": visible.map { asset in
+            ["id": asset.id.uuidString, "name": "Background", "thumb": remoteThumbnailCache[asset.id] ?? ""]
          }]
     }
 
@@ -22,6 +30,9 @@ extension CameraModel {
         guard let action = command["action"] as? String else { return "Missing action" }
         let value = command["value"] as? String ?? ""
         switch action {
+        case "livePreview":
+            guard let flag = command["value"] as? Bool, peer.authorized else { return "Pair a Remote first" }
+            setRemotePreviewEnabled(flag)
         case "stream":
             guard let on = command["value"] as? Bool else { return "Expected on/off" }
             if on != (streaming || starting) { toggleStream() }
@@ -47,7 +58,10 @@ extension CameraModel {
             case "exposure": exposure = min(2, max(-2, number))
             default: whiteBalanceLocked = true; whiteBalanceTemperature = min(6500, max(2500, number))
             }
-        case "subject": guard let mode = SubjectMode(rawValue: value) else { return "Unknown mode" }; settings.subjectMode = mode
+        case "subject":
+            guard let mode = SubjectMode(rawValue: value) else { return "Unknown mode" }
+            settings.subjectMode = mode
+            if mode == .lock { relockSubject() }
         case "background": guard let mode = BackgroundMode(rawValue: value), mode != .custom else { return "Choose a saved background" }; setBackgroundMode(mode)
         case "asset": guard let asset = backgrounds.first(where: { $0.id.uuidString == value }) else { return "Unknown background" }; selectBackground(asset)
         case "clearRecentBackgrounds": clearRecentBackgrounds()

@@ -33,7 +33,7 @@ While FacePull is streaming, open `http://127.0.0.1:18080/remote` for USB, or `h
 
 ## iPhone 13 Pro
 
-FacePull supports iOS 17+; native Liquid Glass needs iOS 26, which iPhone 13 Pro supports. It has no Dynamic Island; the Live Activity uses the Lock Screen. Heat can reduce FPS. Start with High/720p for tracking plus portrait blur. Subject lock is visual tracking, not identity recognition. Put yourself clearly in frame and tap **Lock me** again to reacquire if necessary. Auto widen fits detected faces as far as the camera's field of view allows.
+FacePull supports iOS 17+; native Liquid Glass needs iOS 26, which iPhone 13 Pro supports. Heat can reduce FPS. Start with High/720p for tracking plus portrait blur. Subject lock is visual tracking, not identity recognition. Put yourself clearly in frame and tap **Lock me** again to reacquire if necessary. Auto widen fits detected faces as far as the camera's field of view allows.
 
 ## Backgrounds and presets
 

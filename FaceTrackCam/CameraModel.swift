@@ -68,7 +68,10 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
     private let server = StreamServer()
     private let rtsp = H264RTSPServer()
     let peer = PeerControl(role: .host)
-    private let liveActivity = StreamLiveActivity()
+    @Published private(set) var remotePreviewEnabled = false
+    private(set) var remotePreviewToken = UUID().uuidString
+    var remotePreviewName: String { rtsp.previewName }
+    var remoteThumbnailCache: [UUID: String] = [:]
     private let output = AVCaptureVideoDataOutput()
     private var device: AVCaptureDevice?
     private var desiredActive = false
@@ -94,6 +97,10 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
         server.onRemoteState = { [weak self] in self?.remoteState() ?? [:] }
         server.onRemoteCommand = { [weak self] command in self?.applyRemote(command) }
         peer.onCommand = { [weak self] command in self?.applyRemote(command) }
+        peer.onDisconnect = { [weak self] in
+            self?.setRemotePreviewEnabled(false)
+            self?.remotePreviewToken = UUID().uuidString
+        }
         rtsp.onError = { [weak self] message in self?.error = message }
         rtsp.onMicrophoneFailure = { [weak self] in self?.setMicrophoneEnabled(false) }
         rtsp.onStatus = { [weak self] running, error in
@@ -104,7 +111,6 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
             if !running { self.streamStarted = nil }
             self.oledState.setStreaming(running, now: ProcessInfo.processInfo.systemUptime)
             self.syncOLEDSaver()
-            self.liveActivity.setStreaming(running, since: self.streamStarted)
             self.updateIdleTimer()
             if let error { self.error = error }
         }
@@ -211,10 +217,17 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
         }
     }
 
+    func setRemotePreviewEnabled(_ enabled: Bool) {
+        remotePreviewEnabled = enabled
+        rtsp.setPreviewEnabled(enabled, token: remotePreviewToken)
+    }
+
     private func enableMicrophoneSession() {
         do {
             let audio = AVAudioSession.sharedInstance()
             try audio.setCategory(.record, mode: .videoRecording, options: [.allowBluetooth, .mixWithOthers])
+            try audio.setPreferredSampleRate(48_000)
+            try audio.setPreferredIOBufferDuration(0.005)
             try audio.setActive(true)
             microphoneEnabled = true
             rtsp.setMicrophoneEnabled(true)
@@ -614,7 +627,11 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
                 // each encoder owns its own bounded admission instead of forcing a
                 // GPU readback and a second upload on the capture queue.
                 preview.put(image)
-                rtsp.offer(image, time: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+                let captureTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                let hostTime = session.masterClock.map {
+                    CMSyncConvertTime(captureTime, from: $0, to: CMClockGetHostTimeClock())
+                } ?? captureTime
+                rtsp.offer(image, time: hostTime)
                 statsFrames += 1
                 if time - statsTime >= 1 {
                     let value = statsTime == 0 ? 0 : Int((Double(statsFrames) / (time - statsTime)).rounded())

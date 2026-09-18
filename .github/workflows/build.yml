@@ -40,12 +40,6 @@ jobs:
         run: |
           set -o pipefail
           xcodebuild build -project FaceTrackCam.xcodeproj -scheme FaceTrackCam -sdk iphonesimulator -configuration Debug CODE_SIGNING_ALLOWED=NO -derivedDataPath simulator_data | tee simulator-build.log
-      - name: Verify Live Activity packaging
-        run: |
-          APP=derived_data/Build/Products/Release-iphoneos/FaceTrackCam.app
-          test -d "$APP/PlugIns/StreamActivity.appex"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :NSSupportsLiveActivities' "$APP/Info.plist")" = true
-          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$APP/PlugIns/StreamActivity.appex/Info.plist")" = com.apple.widgetkit-extension
       - name: Verify full-screen launch configuration
         run: /usr/libexec/PlistBuddy -c 'Print :UILaunchScreen' derived_data/Build/Products/Release-iphoneos/FaceTrackCam.app/Info.plist
       - name: Package unsigned IPA

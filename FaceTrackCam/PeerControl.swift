@@ -5,7 +5,7 @@ import MultipeerConnectivity
 import Security
 
 /// Encrypted local control channel. The camera and its remote share command/state
-/// contracts, but the remote never receives a camera image.
+/// contracts; optional preview uses a separate encrypted session.
 final class PeerControl: NSObject, ObservableObject {
     enum Role { case host, remote }
 
@@ -16,6 +16,7 @@ final class PeerControl: NSObject, ObservableObject {
     @Published var error: String?
     let pairingCode: String
     var onCommand: (([String: Any]) -> String?)?
+    var onDisconnect: (() -> Void)?
 
     private let role: Role
     private let selfID: MCPeerID
@@ -115,6 +116,7 @@ final class PeerControl: NSObject, ObservableObject {
                   let challenge = challenges.removeValue(forKey: peer.displayName),
                   let proof = message["proof"] as? String,
                   proof == Self.proof(token, text: "remote:\(challenge)") else { return }
+            if authorizedPeer != peer { onDisconnect?() }
             authorizedPeer = peer; authorized = true; lastState = Data()
         case (.host, "pair"):
             guard failedPairings[peer.displayName, default: 0] < 5 else { return }
@@ -125,6 +127,7 @@ final class PeerControl: NSObject, ObservableObject {
             failedPairings[peer.displayName] = 0
             let token = UUID().uuidString + UUID().uuidString
             PeerSecret.save(token, key: "host:\(peer.displayName)")
+            if authorizedPeer != peer { onDisconnect?() }
             authorizedPeer = peer; authorized = true; lastState = Data()
             let nonce = pairNonces[peer.displayName] ?? ""
             send(["type": "paired", "token": token,
@@ -182,7 +185,9 @@ extension PeerControl: MCSessionDelegate {
                 }
             case .notConnected:
                 self.connected = !session.connectedPeers.isEmpty
-                if self.role == .host && self.authorizedPeer == peerID { self.authorized = false; self.authorizedPeer = nil }
+                if self.role == .host && self.authorizedPeer == peerID {
+                    self.authorized = false; self.authorizedPeer = nil; self.onDisconnect?()
+                }
                 if self.role == .remote && self.activePeer == peerID { self.authorized = false; self.verifiedHost = false }
                 self.invited.remove(peerID.displayName)
             case .connecting: break

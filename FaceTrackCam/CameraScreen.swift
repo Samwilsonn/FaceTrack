@@ -84,6 +84,7 @@ struct CameraScreen: View {
                 Spacer(minLength: 0)
                 if let panel {
                     panelContent(panel).padding(.horizontal, panel == .settings ? 0 : 24)
+                        .contentShape(Rectangle()).onTapGesture {}
                         .padding(.bottom, panel == .background ? 14 : 0)
                         .opacity(camera.streaming ? 0.55 : 1)
                         .transition(.asymmetric(insertion: .scale(scale: 0.95, anchor: .bottom).combined(with: .opacity), removal: .scale(scale: 0.95, anchor: .bottom).combined(with: .opacity)))
@@ -264,6 +265,7 @@ struct CameraScreen: View {
                     Button {
                         camera.settings.subjectMode = mode
                         if mode == .lock { camera.relockSubject() }
+                        panel = .faceTrack; focusedTool = .faceTrack
                     } label: {
                         Text(mode.rawValue).font(.subheadline.weight(.medium)).padding(.horizontal, 16).frame(minHeight: 44)
                             .glassCapsule(tint: camera.settings.subjectMode == mode ? .white.opacity(0.18) : .clear)
