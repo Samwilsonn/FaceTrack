@@ -193,7 +193,7 @@ struct RemoteScreen: View {
 
     private func text(_ key: String) -> String { peer.state[key] as? String ?? "" }
     private func items(_ key: String) -> [RemoteItem] {
-        (peer.state[key] as? [[String: String]] ?? []).compactMap { item in
+        (peer.state[key] as? [[String: String]] ?? []).compactMap { (item: [String: String]) -> RemoteItem? in
             guard let id = item["id"], let name = item["name"] else { return nil }
             let image = item["thumb"].flatMap { Data(base64Encoded: $0) }.flatMap { UIImage(data: $0) }
             return RemoteItem(id: id, name: name, thumbnail: image)
