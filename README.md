@@ -27,8 +27,10 @@ with the user's normal iPhone installation process.
 
 The iPhone's raw IP alone is not an OBS media URL. Reserve the iPhone's Wi-Fi
 address in the router for a stable saved source. The access key persists across
-stream restarts but changes if FacePull's app data is removed. Microphone audio
-can be toggled while streaming; the negotiated audio track carries silence while muted.
+stream restarts but changes if FacePull's app data is removed. Streaming is video-only:
+no microphone capture or silent audio track is sent. Reconnect OBS after upgrading
+to negotiate the video-only stream. Previous audio code is retained in `ArchivedAudio/`
+and excluded from the build. Add a separate microphone source in OBS if needed.
 For timing measurements and Wi-Fi recovery checks, see [LATENCY-TESTS.md](LATENCY-TESTS.md).
 
 ## OBS over USB on Windows

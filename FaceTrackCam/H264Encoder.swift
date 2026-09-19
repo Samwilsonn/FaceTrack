@@ -60,7 +60,9 @@ final class H264Encoder {
             var buffer: CVPixelBuffer?
             guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer) == kCVReturnSuccess,
                   let buffer else { self.releaseAdmission(generation: generation); return }
+            let renderStarted = StreamDiagnostics.isEnabled ? ProcessInfo.processInfo.systemUptime : 0
             self.context.render(image, to: buffer, bounds: CGRect(origin: .zero, size: self.size), colorSpace: self.colorSpace)
+            StreamDiagnostics.elapsed("Final CI render", since: renderStarted)
             let duration = CMTime(seconds: 1 / self.frameRate, preferredTimescale: 90_000)
             self.admission.lock()
             let force = self.forceKeyframe || time.seconds - self.lastKeyframeTime >= 1
@@ -111,6 +113,7 @@ final class H264Encoder {
             codecType: kCMVideoCodecType_H264, encoderSpecification: specification as CFDictionary,
             imageBufferAttributes: attributes as CFDictionary, compressedDataAllocator: nil,
             outputCallback: nil, refcon: nil, compressionSessionOut: &created)
+        StreamDiagnostics.status("VT low-latency session", code: status)
         if status != noErr {
             // Older devices may not support this mode; preserve the working
             // hardware real-time path instead of silently losing streaming.
@@ -121,6 +124,7 @@ final class H264Encoder {
                 codecType: kCMVideoCodecType_H264, encoderSpecification: specification as CFDictionary,
                 imageBufferAttributes: attributes as CFDictionary, compressedDataAllocator: nil,
                 outputCallback: nil, refcon: nil, compressionSessionOut: &created)
+            StreamDiagnostics.status("VT fallback session", code: status, fallback: true)
         }
         guard status == noErr, let created else {
             onError?("Hardware H.264 encoder is unavailable (\(status)).")
@@ -130,16 +134,22 @@ final class H264Encoder {
         let bitrate = max(1_000_000, min(12_000_000, Int(size.width * size.height * frameRate * 0.12)))
         let realtime = VTSessionSetProperty(created, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         let ordering = VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        StreamDiagnostics.status("VT real-time property", code: realtime)
+        StreamDiagnostics.status("VT frame-ordering property", code: ordering)
         guard realtime == noErr, ordering == noErr else {
             VTCompressionSessionInvalidate(created); session = nil
             onError?("H.264 real-time configuration failed (\(realtime), \(ordering)).")
             return false
         }
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 1))
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrate))
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: Int(frameRate)))
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: Int(frameRate)))
-        VTCompressionSessionPrepareToEncodeFrames(created)
+        StreamDiagnostics.status("VT max-frame-delay property", code:
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 1)))
+        StreamDiagnostics.status("VT bitrate property", code:
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrate)))
+        StreamDiagnostics.status("VT keyframe-interval property", code:
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: Int(frameRate))))
+        StreamDiagnostics.status("VT expected-FPS property", code:
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: Int(frameRate))))
+        StreamDiagnostics.status("VT prepare", code: VTCompressionSessionPrepareToEncodeFrames(created))
         return true
     }
 

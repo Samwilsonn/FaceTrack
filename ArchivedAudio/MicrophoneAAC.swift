@@ -206,6 +206,11 @@ final class MicrophoneAAC {
     private func emit(_ data: Data, timestamp: UInt32, silent: Bool) {
         if let last = lastEmittedTimestamp, Int32(bitPattern: timestamp &- last) <= 0 { return }
         lastEmittedTimestamp = timestamp
+        if !silent && StreamDiagnostics.isEnabled {
+            let now = UInt32(truncatingIfNeeded: Int64(CMClockGetTime(CMClockGetHostTimeClock()).seconds * 48_000))
+            StreamDiagnostics.sample("Audio capture to emit", milliseconds:
+                Double(Int32(bitPattern: now &- timestamp)) / 48)
+        }
         onFrame?(Frame(data: data, timestamp: timestamp, silent: silent))
     }
 

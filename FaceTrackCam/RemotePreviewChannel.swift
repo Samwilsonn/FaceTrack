@@ -25,7 +25,6 @@ final class RemotePreviewChannel: NSObject {
     private var sequence: UInt32 = 0
     private var watchdog: DispatchSourceTimer?
     private var generation = 0
-    private var lastKeyframeRequest = Date.distantPast
 
     init(host: Bool) { self.host = host; super.init() }
 
@@ -72,8 +71,13 @@ final class RemotePreviewChannel: NSObject {
         let now = ProcessInfo.processInfo.systemUptime
         let age = Int32(bitPattern: LiveStreamClock.ticks(CMClockGetTime(CMClockGetHostTimeClock()).seconds, rate: 90_000) &- frame.timestamp)
         if age > 13_500 { window.requireKeyframe(); gate.unlock(); return }
-        let sequence = self.sequence &+ 1
-        guard window.admit(sequence: sequence, keyframe: frame.isKeyframe, now: now) else {
+        if window.expired(now: now) { window.requireKeyframe() }
+        // A sequence gap on an IDR identifies a drained, fresh recovery epoch.
+        // The wire format is unchanged; ordinary frames remain consecutive.
+        let recovery = window.needsKeyframe
+        let sequence = self.sequence &+ (recovery ? 2 : 1)
+        let bytes = frame.nalUnits.reduce(14) { $0 + 4 + $1.count }
+        guard window.admit(sequence: sequence, keyframe: frame.isKeyframe, now: now, bytes: bytes) else {
             gate.unlock(); return
         }
         self.sequence = sequence
@@ -81,6 +85,14 @@ final class RemotePreviewChannel: NSObject {
         gate.unlock()
         queue.async {
             guard self.generation == generation else { return }
+            self.gate.lock()
+            let obsolete = self.window.needsKeyframe && !recovery
+            self.gate.unlock()
+            guard !obsolete else { self.release(sequence, needsKeyframe: true); return }
+            let stamp = LiveStreamClock.ticks(CMClockGetTime(CMClockGetHostTimeClock()).seconds, rate: 90_000)
+            guard Int32(bitPattern: stamp &- frame.timestamp) <= 13_500 else {
+                self.release(sequence, needsKeyframe: true); return
+            }
             guard let session = self.session, let peer = self.peer else { self.release(sequence, needsKeyframe: true); return }
             guard let data = PreviewPacket(sequence: sequence, timestamp: frame.timestamp,
                 keyframe: frame.isKeyframe, units: frame.nalUnits).encoded() else {
@@ -96,31 +108,27 @@ final class RemotePreviewChannel: NSObject {
         gate.lock()
         let sentAt = window.pending[sequence]
         let valid = window.acknowledge(sequence, needsKeyframe: needsKeyframe)
-        let recover = window.needsKeyframe
         gate.unlock()
         guard valid else { return }
         if let sentAt { StreamDiagnostics.sample("Preview round trip", milliseconds: (ProcessInfo.processInfo.systemUptime - sentAt) * 1000) }
-        if recover { requestRecovery() }
-    }
-
-    private func requestRecovery() {
-        if Date().timeIntervalSince(lastKeyframeRequest) >= 0.25 {
-            lastKeyframeRequest = Date(); onKeyframe?()
-        }
+        // Recovery uses the encoder's existing periodic IDRs. Preview congestion
+        // must not force repeated large IDRs into the primary OBS stream.
     }
 
     private func checkDeadline() {
         guard host else { return }
         gate.lock()
-        let expired = window.expired(now: ProcessInfo.processInfo.systemUptime)
-        let recover = accepting && window.needsKeyframe
+        let now = ProcessInfo.processInfo.systemUptime
+        if window.expired(now: now) { window.requireKeyframe() }
+        let expired = window.stalled(now: now)
         if expired { generation &+= 1; accepting = false; window = PreviewSendWindow() }
         gate.unlock()
         if expired {
             // MCSession cannot selectively retract reliable packets already sent.
-            // Drop the session rather than let a recovered link replay its backlog.
+            // Ordinary jitter drains the bounded window without reconnecting.
+            // Only a genuinely stalled window discards the reliable transport.
             session?.disconnect(); onDemand?(false)
-        } else if recover { requestRecovery() }
+        }
     }
 }
 

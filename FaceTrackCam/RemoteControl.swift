@@ -20,7 +20,6 @@ extension CameraModel {
          "intensity": Double(settings.intensity), "subject": settings.subjectMode.rawValue,
          "exposure": exposure, "exposureLocked": exposureLocked, "temperature": whiteBalanceTemperature,
          "whiteBalanceLocked": whiteBalanceLocked, "background": settings.background.rawValue, "mirror": settings.mirrorStream,
-         "microphone": microphoneEnabled,
          "ready": ready, "starting": starting, "torch": torch, "hasTorch": hasTorch,
          "frontCamera": frontCamera, "mirrorPreview": mirrorPreview,
          "hasRecentBackgrounds": !recentBackgroundIDs.isEmpty,
@@ -60,9 +59,6 @@ extension CameraModel {
             case "whiteBalanceLocked": whiteBalanceLocked = flag
             default: settings.mirrorStream = flag
             }
-        case "microphone":
-            guard let flag = command["value"] as? Bool else { return "Expected on/off" }
-            setMicrophoneEnabled(flag)
         case "intensity", "exposure", "temperature":
             guard let number = Float(value), number.isFinite else { return "Invalid adjustment" }
             switch action {

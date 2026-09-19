@@ -12,21 +12,12 @@ final class H264RTSPServer {
         var awaitingKeyframe = true
         var sending = false
         var videoSendStarted: Date?
-        var audioSendStarted: Date?
         var lastClockReport = Date.distantPast
         var sequence = UInt16.random(in: 0...UInt16.max)
-        var audioSequence = UInt16.random(in: 0...UInt16.max)
-        var audioSending = false
         var videoChannel: UInt8?
-        var audioChannel: UInt8?
-        var audioOffered = false
         var videoControl = ""
-        var audioControl = ""
         var videoPackets: UInt32 = 0
         var videoOctets: UInt32 = 0
-        var audioPackets: UInt32 = 0
-        var audioOctets: UInt32 = 0
-        var pendingAudio: [MicrophoneAAC.Frame] = []
         var lastProgress = Date()
         let sessionID = UUID().uuidString
         init(_ connection: NWConnection) { self.connection = connection }
@@ -37,7 +28,6 @@ final class H264RTSPServer {
     var onViewers: ((Int) -> Void)?
     private let queue = DispatchQueue(label: "facepull.rtsp", qos: .userInitiated)
     private let encoder = H264Encoder()
-    private let microphone = MicrophoneAAC()
     private let remotePreview = RemotePreviewChannel(host: true)
     private var previewWanted = false
     private var previewToken = ""
@@ -46,9 +36,6 @@ final class H264RTSPServer {
     private let deliveryGate = NSLock()
     private var deliveryPending = false
     private var deliveryDropped = false
-    private var audioDeliveryQueued = false
-    private var audioFrames: [MicrophoneAAC.Frame] = []
-    private var audioAllowed = false
     private var hasViewers = false
     private var latestVideoTimestamp: UInt32?
     private var listener: NWListener?
@@ -56,10 +43,7 @@ final class H264RTSPServer {
     private var timer: DispatchSourceTimer?
     private var token = ""
     private var running = false
-    private var microphoneEnabled = false
-    private var audioCaptureRunning = false
     private let ssrc = UInt32.random(in: 1...UInt32.max)
-    private let audioSSRC = UInt32.random(in: 1...UInt32.max)
 
     init() {
         remotePreview.onDemand = { [weak self] enabled in
@@ -93,32 +77,7 @@ final class H264RTSPServer {
             }
         }
         encoder.onError = { [weak self] message in self?.report(message) }
-        microphone.onFrame = { [weak self] frame in
-            guard let self else { return }
-            self.deliveryGate.lock()
-            guard self.audioAllowed else { self.deliveryGate.unlock(); return }
-            if self.audioFrames.count == 8 { self.audioFrames.removeFirst() }
-            self.audioFrames.append(frame)
-            guard !self.audioDeliveryQueued else { self.deliveryGate.unlock(); return }
-            self.audioDeliveryQueued = true
-            self.deliveryGate.unlock()
-            self.queue.async { self.drainAudio() }
-        }
-        microphone.onError = { [weak self] message in
-            guard let self else { return }
-            self.deliveryGate.lock()
-            self.audioFrames.removeAll()
-            self.deliveryGate.unlock()
-            self.queue.async {
-                self.microphoneEnabled = false
-                self.microphone.setMicrophoneEnabled(false)
-                self.report(message)
-                DispatchQueue.main.async { self.onMicrophoneFailure?() }
-            }
-        }
     }
-
-    var onMicrophoneFailure: (() -> Void)?
 
     func setPreviewEnabled(_ enabled: Bool, token: String) {
         queue.async {
@@ -130,18 +89,6 @@ final class H264RTSPServer {
     private func updatePreview() {
         if running && previewWanted { remotePreview.start(token: previewToken) }
         else { remotePreview.stop() }
-    }
-
-    func setMicrophoneEnabled(_ enabled: Bool) {
-        deliveryGate.lock()
-        if !enabled { audioFrames.removeAll() }
-        deliveryGate.unlock()
-        queue.async {
-            self.microphoneEnabled = enabled
-            if !enabled { self.clients.values.forEach { $0.pendingAudio.removeAll() } }
-            self.microphone.setMicrophoneEnabled(enabled)
-            self.updateAudioCapture()
-        }
     }
 
     func start(token: String, size: CGSize, frameRate: Double) {
@@ -197,7 +144,6 @@ final class H264RTSPServer {
         running = false
         remotePreview.stop()
         deliveryGate.lock()
-        audioFrames.removeAll()
         latestVideoTimestamp = nil
         deliveryGate.unlock()
         listener?.stateUpdateHandler = nil
@@ -206,7 +152,6 @@ final class H264RTSPServer {
         timer?.cancel(); timer = nil
         for client in clients.values { client.connection.forceCancel() }
         clients.removeAll()
-        updateAudioCapture()
         reportViewers()
         encoder.stop()
         if hadListener { reportStatus(false) }
@@ -269,7 +214,7 @@ final class H264RTSPServer {
             return
         }
         guard let url = URLComponents(string: uri),
-              ["/facepull", "/facepull/trackID=0", "/facepull/trackID=1"].contains(url.path),
+              VideoStreamDescription.accepts(path: url.path),
               url.queryItems?.first(where: { $0.name == "token" })?.value == token else {
             reply(id, cseq: cseq, status: "403 Forbidden"); return
         }
@@ -277,50 +222,38 @@ final class H264RTSPServer {
         case "DESCRIBE":
             guard url.path == "/facepull" else { reply(id, cseq: cseq, status: "400 Bad Request"); return }
             let videoControl = uri.replacingOccurrences(of: "?token=", with: "/trackID=0?token=")
-            let audioControl = uri.replacingOccurrences(of: "?token=", with: "/trackID=1?token=")
-            client.audioOffered = true
             client.videoControl = videoControl
-            client.audioControl = audioControl
-            var sdp = "v=0\r\no=FacePull 0 0 IN IP4 127.0.0.1\r\ns=FacePull\r\nt=0 0\r\na=control:*\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\na=control:\(videoControl)\r\n"
-            if client.audioOffered {
-                sdp += "m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/48000/1\r\na=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;config=1188;constantDuration=1024;SizeLength=13;IndexLength=3;IndexDeltaLength=3\r\na=control:\(audioControl)\r\n"
-            }
+            let sdp = VideoStreamDescription.sdp(control: videoControl)
             reply(id, cseq: cseq, extra: "Content-Base: \(uri)\r\nContent-Type: application/sdp\r\n", body: sdp)
         case "SETUP":
             let transport = lines.first(where: { $0.lowercased().hasPrefix("transport:") })?.lowercased() ?? ""
             guard transport.contains("rtp/avp/tcp") && transport.contains("interleaved=") else {
                 reply(id, cseq: cseq, status: "461 Unsupported Transport"); return
             }
-            let isAudio = url.path == "/facepull/trackID=1"
-            guard url.path != "/facepull", (!isAudio || client.audioOffered),
+            guard url.path == "/facepull/trackID=0",
                   let channelText = transport.components(separatedBy: "interleaved=").dropFirst().first?.split(separator: ";").first,
                   let first = UInt8(channelText.split(separator: "-").first ?? ""), first <= 252,
-                  channelText == "\(first)-\(first + 1)", first.isMultiple(of: 2),
-                  (isAudio ? client.videoChannel : client.audioChannel) != first else {
+                  channelText == "\(first)-\(first + 1)", first.isMultiple(of: 2) else {
                 reply(id, cseq: cseq, status: "461 Unsupported Transport"); return
             }
-            if isAudio { client.audioChannel = first } else { client.videoChannel = first }
-            let trackSSRC = isAudio ? audioSSRC : ssrc
-            reply(id, cseq: cseq, extra: "Transport: RTP/AVP/TCP;unicast;interleaved=\(first)-\(first + 1);ssrc=\(String(trackSSRC, radix: 16))\r\nSession: \(client.sessionID);timeout=60\r\n")
+            client.videoChannel = first
+            reply(id, cseq: cseq, extra: "Transport: RTP/AVP/TCP;unicast;interleaved=\(first)-\(first + 1);ssrc=\(String(ssrc, radix: 16))\r\nSession: \(client.sessionID);timeout=60\r\n")
         case "PLAY":
-            guard client.videoChannel != nil || client.audioChannel != nil else { reply(id, cseq: cseq, status: "455 Method Not Valid in This State"); return }
+            guard client.videoChannel != nil else { reply(id, cseq: cseq, status: "455 Method Not Valid in This State"); return }
             let hostTime = CMClockGetTime(CMClockGetHostTimeClock()).seconds
             var info: [String] = []
             if client.videoChannel != nil { info.append("url=\(client.videoControl);seq=\(client.sequence);rtptime=\(LiveStreamClock.ticks(hostTime, rate: 90_000))") }
-            if client.audioChannel != nil { info.append("url=\(client.audioControl);seq=\(client.audioSequence);rtptime=\(LiveStreamClock.ticks(hostTime, rate: 48_000))") }
             reply(id, cseq: cseq, extra: "Session: \(client.sessionID)\r\nRange: npt=0.000-\r\nRTP-Info: \(info.joined(separator: ","))\r\n")
             client.playing = true; client.awaitingKeyframe = true
             client.lastProgress = Date()
             sendClockReport(id, client: client)
             reportViewers()
-            updateAudioCapture()
             encoder.requestKeyframe()
         case "GET_PARAMETER": reply(id, cseq: cseq, extra: "Session: \(client.sessionID)\r\n")
         case "TEARDOWN":
             reply(id, cseq: cseq, extra: "Session: \(client.sessionID)\r\n")
             client.playing = false
             reportViewers()
-            updateAudioCapture()
         default: reply(id, cseq: cseq, status: "405 Method Not Allowed")
         }
     }
@@ -352,10 +285,12 @@ final class H264RTSPServer {
             client.awaitingKeyframe = false
             var packet = Data()
             let previousSequence = client.sequence
+            let packetizationStarted = StreamDiagnostics.isEnabled ? ProcessInfo.processInfo.systemUptime : 0
             for (index, unit) in frame.nalUnits.enumerated() {
                 packet.append(RTPH264.packetize(unit, sequence: &client.sequence, timestamp: frame.timestamp,
                     ssrc: ssrc, channel: client.videoChannel!, marker: index == frame.nalUnits.count - 1))
             }
+            StreamDiagnostics.elapsed("Video packetization", since: packetizationStarted)
             client.sending = true
             let packetCount = UInt32(client.sequence &- previousSequence)
             client.videoPackets &+= packetCount
@@ -376,66 +311,12 @@ final class H264RTSPServer {
         }
     }
 
-    private func drainAudio() {
-        deliveryGate.lock()
-        let frames = audioFrames
-        audioFrames.removeAll(keepingCapacity: true)
-        audioDeliveryQueued = false
-        deliveryGate.unlock()
-        guard running else { return }
-        for (id, client) in clients where client.playing && client.audioChannel != nil {
-            client.pendingAudio.append(contentsOf: frames.filter { microphoneEnabled || $0.silent })
-            if client.pendingAudio.count > 8 { client.pendingAudio.removeFirst(client.pendingAudio.count - 8) }
-            sendAudio(id, client: client)
-        }
-    }
-
-    private func sendAudio(_ id: UUID, client: Client) {
-            guard running, client.playing, let channel = client.audioChannel,
-                  !client.audioSending, !client.pendingAudio.isEmpty else { return }
-            var packet = Data()
-            let now = LiveStreamClock.ticks(CMClockGetTime(CMClockGetHostTimeClock()).seconds, rate: 48_000)
-            for frame in client.pendingAudio where !frame.data.isEmpty && frame.data.count <= 8191 {
-                guard Int32(bitPattern: now &- frame.timestamp) < 12_000 else { continue }
-                packet.append(RTPAAC.packetize(frame.data, sequence: &client.audioSequence,
-                    timestamp: frame.timestamp, ssrc: audioSSRC, channel: channel))
-                client.audioPackets &+= 1
-                client.audioOctets &+= UInt32(frame.data.count + 4)
-            }
-            client.pendingAudio.removeAll(keepingCapacity: true)
-            guard !packet.isEmpty else { return }
-            client.audioSending = true
-            client.audioSendStarted = Date()
-            client.connection.send(content: packet, completion: .contentProcessed { [weak self, weak client] error in
-                guard let self, let client, self.clients[id] === client else { return }
-                if error != nil { self.remove(id) }
-                else {
-                    if RTSPSendDeadline.isExpired(startedAt: client.audioSendStarted?.timeIntervalSinceReferenceDate,
-                                                   now: Date().timeIntervalSinceReferenceDate) {
-                        self.remove(id); return
-                    }
-                    client.audioSending = false; client.audioSendStarted = nil
-                    client.lastProgress = Date(); self.sendAudio(id, client: client)
-                }
-            })
-    }
-
-    private func updateAudioCapture() {
-        let needed = running && clients.values.contains { $0.playing && $0.audioChannel != nil }
-        deliveryGate.lock(); audioAllowed = needed; deliveryGate.unlock()
-        guard needed != audioCaptureRunning else { return }
-        audioCaptureRunning = needed
-        if needed { microphone.start(microphoneEnabled: microphoneEnabled) } else { microphone.stop() }
-    }
-
     private func remove(_ id: UUID) {
         guard let client = clients.removeValue(forKey: id) else { return }
         client.connection.stateUpdateHandler = nil
         // Abort, do not gracefully drain a stale live-media socket.
-        client.pendingAudio.removeAll()
         client.connection.forceCancel()
         reportViewers()
-        updateAudioCapture()
     }
 
     private func expireClients() {
@@ -446,12 +327,10 @@ final class H264RTSPServer {
             // a stall. It can stay small on a healthy, actively draining socket.
             return now.timeIntervalSince(client.lastProgress) > 6 ||
                 RTSPSendDeadline.isExpired(startedAt: client.videoSendStarted?.timeIntervalSinceReferenceDate,
-                                           now: now.timeIntervalSinceReferenceDate) ||
-                RTSPSendDeadline.isExpired(startedAt: client.audioSendStarted?.timeIntervalSinceReferenceDate,
                                            now: now.timeIntervalSinceReferenceDate)
         }.map(\.key)
         expired.forEach(remove)
-        for (id, client) in clients where client.playing && !client.sending && !client.audioSending && now.timeIntervalSince(client.lastClockReport) >= 1 {
+        for (id, client) in clients where client.playing && !client.sending && now.timeIntervalSince(client.lastClockReport) >= 1 {
             sendClockReport(id, client: client)
         }
     }
@@ -465,11 +344,6 @@ final class H264RTSPServer {
             report.append(LiveStreamClock.report(channel: channel + 1, ssrc: ssrc,
                 timestamp: LiveStreamClock.ticks(host, rate: 90_000), unixTime: wall,
                 packets: client.videoPackets, octets: client.videoOctets))
-        }
-        if let channel = client.audioChannel {
-            report.append(LiveStreamClock.report(channel: channel + 1, ssrc: audioSSRC,
-                timestamp: LiveStreamClock.ticks(host, rate: 48_000), unixTime: wall,
-                packets: client.audioPackets, octets: client.audioOctets))
         }
         client.connection.send(content: report, completion: .contentProcessed { [weak self] error in
             if error != nil { self?.remove(id) }
@@ -529,25 +403,5 @@ private enum RTPH264 {
         result.append(payload)
         sequence &+= 1
         return result
-    }
-}
-
-private enum RTPAAC {
-    static func packetize(_ accessUnit: Data, sequence: inout UInt16, timestamp: UInt32,
-                          ssrc: UInt32, channel: UInt8) -> Data {
-        // RFC 3640: one AAC-hbr access unit, 16-bit AU-header-length and
-        // 13-bit AU-size followed by a zero AU-index.
-        let size = accessUnit.count
-        let length = size + 16
-        var packet = Data([0x24, channel, UInt8(length >> 8), UInt8(length & 0xff)])
-        packet.append(contentsOf: [0x80, 0xe1, UInt8(sequence >> 8), UInt8(sequence & 0xff)])
-        packet.append(contentsOf: [UInt8(timestamp >> 24), UInt8((timestamp >> 16) & 0xff),
-                                   UInt8((timestamp >> 8) & 0xff), UInt8(timestamp & 0xff)])
-        packet.append(contentsOf: [UInt8(ssrc >> 24), UInt8((ssrc >> 16) & 0xff),
-                                   UInt8((ssrc >> 8) & 0xff), UInt8(ssrc & 0xff)])
-        packet.append(contentsOf: [0, 16, UInt8(size >> 5), UInt8((size & 0x1f) << 3)])
-        packet.append(accessUnit)
-        sequence &+= 1
-        return packet
     }
 }

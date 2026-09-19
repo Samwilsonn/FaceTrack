@@ -38,9 +38,7 @@ final class RemotePreviewDecoder {
     private var enabled = false
     private var needsKeyframe = true
     private var lastSequence: UInt32?
-    private var lastTimestamp: UInt32?
-    private var sourceElapsed: Double = 0
-    private var earliestOffset: Double?
+    private var arrivalClock = PreviewArrivalClock()
     private var parameterSets: [Data] = []
     private var onDimensions: ((CGSize) -> Void)?
 
@@ -54,15 +52,15 @@ final class RemotePreviewDecoder {
     func setEnabled(_ enabled: Bool) {
         lock.lock(); defer { lock.unlock() }
         self.enabled = enabled; format = nil; needsKeyframe = true; lastSequence = nil
-        lastTimestamp = nil; sourceElapsed = 0; earliestOffset = nil; parameterSets = []
+        arrivalClock = PreviewArrivalClock(); parameterSets = []
         renderer?.flush(removingDisplayedImage: true, completionHandler: nil)
     }
 
     func resetTimeline() {
         lock.lock(); defer { lock.unlock() }
-        lastTimestamp = nil; sourceElapsed = 0; earliestOffset = nil
+        arrivalClock = PreviewArrivalClock()
         lastSequence = nil; needsKeyframe = true
-        renderer?.flush(removingDisplayedImage: true, completionHandler: nil)
+        renderer?.flush(removingDisplayedImage: false, completionHandler: nil)
     }
 
     func display(_ packet: PreviewPacket) -> Bool {
@@ -71,20 +69,16 @@ final class RemotePreviewDecoder {
         var accepted = false
         defer { if !accepted { needsKeyframe = true } }
         let receivedAt = ProcessInfo.processInfo.systemUptime
-        if let lastTimestamp {
-            let delta = Int32(bitPattern: packet.timestamp &- lastTimestamp)
-            guard delta > 0 else { needsKeyframe = true; return false }
-            sourceElapsed += Double(delta) / 90_000
-        }
-        lastTimestamp = packet.timestamp
-        let offset = receivedAt - sourceElapsed
-        earliestOffset = min(earliestOffset ?? offset, offset)
-        let late = offset - (earliestOffset ?? offset)
-        StreamDiagnostics.sample("Preview arrival drift", milliseconds: late * 1000)
-        guard late < 0.12 else { needsKeyframe = true; return false }
-        if let lastSequence, packet.sequence != lastSequence &+ 1 { needsKeyframe = true }
+        let gap = lastSequence.map { packet.sequence != $0 &+ 1 } ?? false
         lastSequence = packet.sequence
-        if renderer.requiresFlushToResumeDecoding || !renderer.isReadyForMoreMediaData {
+        let current = arrivalClock.accept(timestamp: packet.timestamp, now: receivedAt,
+                                           recoveryKeyframe: gap && packet.keyframe)
+        StreamDiagnostics.sample("Preview arrival drift", milliseconds: arrivalClock.drift * 1000)
+        guard current else { needsKeyframe = true; return false }
+        if gap { needsKeyframe = true }
+        // A temporarily full renderer is backpressure, not a decoder failure.
+        // Let it drain; rejecting a frame below already requires the next IDR.
+        if renderer.requiresFlushToResumeDecoding {
             renderer.flush(removingDisplayedImage: false, completionHandler: nil)
             needsKeyframe = true
         }
@@ -130,7 +124,7 @@ final class RemotePreviewDecoder {
         var sample: CMSampleBuffer?
         var size = avcc.count
         var timing = CMSampleTimingInfo(duration: .invalid,
-            presentationTimeStamp: CMTime(seconds: sourceElapsed, preferredTimescale: 90_000), decodeTimeStamp: .invalid)
+            presentationTimeStamp: CMTime(seconds: arrivalClock.elapsed, preferredTimescale: 90_000), decodeTimeStamp: .invalid)
         guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block,
             formatDescription: format, sampleCount: 1, sampleTimingEntryCount: 1,
             sampleTimingArray: &timing, sampleSizeEntryCount: 1, sampleSizeArray: &size,

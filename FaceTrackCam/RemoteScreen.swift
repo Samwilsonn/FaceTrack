@@ -158,16 +158,6 @@ struct RemoteScreen: View {
         case .settings:
             ScrollView {
                 VStack(spacing: 8) {
-                    Button { withAnimation(.spring()) { showConnection.toggle() } } label: {
-                        HStack { Text("Connect"); Spacer(); Image(systemName: "network") }.frame(minHeight: 32)
-                    }.padding(8).liquidGlass(cornerRadius: 16)
-                    if showConnection {
-                        CameraConnectionDetails(viewers: peer.state["viewers"] as? Int ?? 0,
-                            wifiURL: connectionValue("wifiURL"), usbURL: connectionValue("usbURL"),
-                            remoteWifiURL: connectionValue("remoteWifiURL"), remoteUSBURL: connectionValue("remoteUSBURL"),
-                            remotePassword: connectionValue("remotePassword"), fps: peer.state["fps"] as? Int ?? 0,
-                            thermal: text("thermal"), streaming: peer.state["streaming"] as? Bool == true)
-                    }
                     Toggle("Live Preview", isOn: Binding(get: { previewEnabled }, set: {
                         FaceTrackHaptics.tap(); previewEnabled = $0; requestPreview()
                     })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
@@ -186,13 +176,21 @@ struct RemoteScreen: View {
                         set: { FaceTrackHaptics.tap(); peer.command("mirrorPreview", value: $0) })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
                     Toggle("Mirror stream", isOn: Binding(get: { peer.state["mirror"] as? Bool ?? false },
                         set: { FaceTrackHaptics.tap(); peer.command("mirror", value: $0) })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
-                    Toggle("Microphone", isOn: Binding(get: { peer.state["microphone"] as? Bool ?? false },
-                        set: { FaceTrackHaptics.tap(); peer.command("microphone", value: $0) })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
                     ForEach(items("presets"), id: \.id) { item in
                         Button { peer.command("preset", value: item.id) } label: { row(item.name, value: "Apply", icon: "slider.horizontal.3") }
                     }
+                    Button { withAnimation(.spring()) { showConnection.toggle() } } label: {
+                        HStack { Text("Connect"); Spacer(); Image(systemName: "network") }.frame(minHeight: 32)
+                    }.padding(8).liquidGlass(cornerRadius: 16)
+                    if showConnection {
+                        CameraConnectionDetails(viewers: peer.state["viewers"] as? Int ?? 0,
+                            wifiURL: connectionValue("wifiURL"), usbURL: connectionValue("usbURL"),
+                            remoteWifiURL: connectionValue("remoteWifiURL"), remoteUSBURL: connectionValue("remoteUSBURL"),
+                            remotePassword: connectionValue("remotePassword"), fps: peer.state["fps"] as? Int ?? 0,
+                            thermal: text("thermal"), streaming: peer.state["streaming"] as? Bool == true)
+                    }
                 }
-            }.fixedSize(horizontal: false, vertical: true).padding(.horizontal, 16)
+            }.frame(maxHeight: .infinity).padding(.horizontal, 16)
         }
     }
 

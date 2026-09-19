@@ -19,7 +19,6 @@ targets:
         CFBundleDisplayName: FacePull
         UILaunchScreen: {}
         NSCameraUsageDescription: "Use the camera for OBS streaming, face tracking, and background effects."
-        NSMicrophoneUsageDescription: "Use the iPhone microphone for FacePull streaming."
         NSLocalNetworkUsageDescription: "Stream to OBS and pair with another FacePull iPhone on your local network."
         NSBonjourServices:
           - _facepull._tcp
