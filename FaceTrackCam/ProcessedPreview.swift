@@ -63,7 +63,7 @@ struct ProcessedPreview: UIViewRepresentable {
             // The camera pipeline stays landscape for OBS. Rotate only the local
             // preview when the portrait-locked UI is taller than it is wide so a
             // horizontal sensor frame is shown in full instead of being cropped.
-            if size.height > size.width, image.extent.width > image.extent.height {
+            if PreviewGeometry.rotatesToPortrait(source: image.extent.size, viewport: size) {
                 image = image.oriented(.right)
             }
             let scale = max(size.width / image.extent.width, size.height / image.extent.height)

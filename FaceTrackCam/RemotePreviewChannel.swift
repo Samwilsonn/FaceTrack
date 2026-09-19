@@ -1,21 +1,21 @@
 import Foundation
 import MultipeerConnectivity
+import CoreMedia
 
 /// A separate encrypted MCSession keeps video out of the reliable control queue.
-/// One acknowledged frame is the entire transport window; slow peers lose frames.
+/// A bounded flight window covers normal Wi-Fi RTT without stop-and-wait judder.
 final class RemotePreviewChannel: NSObject {
     let name = "FacePullVideo-" + String(CameraLibrary.stableSecret("peerID").prefix(8))
     var onDemand: ((Bool) -> Void)?
     var onKeyframe: (() -> Void)?
     var onPacket: ((PreviewPacket) -> Bool)?
     var onStatus: ((String) -> Void)?
+    var onReset: (() -> Void)?
     private let host: Bool
     private let queue = DispatchQueue(label: "facepull.preview.transport", qos: .userInitiated)
     private let gate = NSLock()
     private var accepting = false
-    private var busy = false
-    private var dropped = false
-    private var needsKeyframe = true
+    private var window = PreviewSendWindow()
     private var session: MCSession?
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
@@ -23,7 +23,7 @@ final class RemotePreviewChannel: NSObject {
     private var token = ""
     private var target = ""
     private var sequence: UInt32 = 0
-    private var outstanding: UInt32?
+    private var watchdog: DispatchSourceTimer?
     private var generation = 0
     private var lastKeyframeRequest = Date.distantPast
 
@@ -38,6 +38,10 @@ final class RemotePreviewChannel: NSObject {
             let session = MCSession(peer: id, securityIdentity: nil, encryptionPreference: .required)
             session.delegate = self; self.session = session
             if self.host {
+                let timer = DispatchSource.makeTimerSource(queue: self.queue)
+                timer.schedule(deadline: .now() + 0.05, repeating: 0.05, leeway: .milliseconds(5))
+                timer.setEventHandler { [weak self] in self?.checkDeadline() }
+                self.watchdog = timer; timer.resume()
                 let advertiser = MCNearbyServiceAdvertiser(peer: id, discoveryInfo: nil, serviceType: "facepull-video")
                 advertiser.delegate = self; self.advertiser = advertiser
                 advertiser.startAdvertisingPeer()
@@ -53,54 +57,70 @@ final class RemotePreviewChannel: NSObject {
     func stop() { queue.async { self.stopInternal() } }
 
     private func stopInternal() {
-        gate.lock(); generation &+= 1; accepting = false; busy = false; dropped = false; needsKeyframe = true; gate.unlock()
+        gate.lock(); generation &+= 1; accepting = false; window = PreviewSendWindow(); gate.unlock()
+        watchdog?.cancel(); watchdog = nil
         advertiser?.stopAdvertisingPeer(); advertiser = nil
         browser?.stopBrowsingForPeers(); browser = nil
         session?.delegate = nil; session?.disconnect(); session = nil
-        peer = nil; outstanding = nil
+        peer = nil
         if host { onDemand?(false) }
     }
 
     func offer(_ frame: H264Encoder.Frame) {
         gate.lock()
         guard accepting else { gate.unlock(); return }
-        guard !busy else { dropped = true; gate.unlock(); return }
-        guard !needsKeyframe || frame.isKeyframe else { gate.unlock(); return }
-        busy = true; needsKeyframe = false
+        let now = ProcessInfo.processInfo.systemUptime
+        let age = Int32(bitPattern: LiveStreamClock.ticks(CMClockGetTime(CMClockGetHostTimeClock()).seconds, rate: 90_000) &- frame.timestamp)
+        if age > 13_500 { window.requireKeyframe(); gate.unlock(); return }
+        let sequence = self.sequence &+ 1
+        guard window.admit(sequence: sequence, keyframe: frame.isKeyframe, now: now) else {
+            gate.unlock(); return
+        }
+        self.sequence = sequence
         let generation = self.generation
         gate.unlock()
         queue.async {
             guard self.generation == generation else { return }
-            guard let session = self.session, let peer = self.peer else { self.release(needsKeyframe: true); return }
-            self.sequence &+= 1
-            let sequence = self.sequence
+            guard let session = self.session, let peer = self.peer else { self.release(sequence, needsKeyframe: true); return }
             guard let data = PreviewPacket(sequence: sequence, timestamp: frame.timestamp,
                 keyframe: frame.isKeyframe, units: frame.nalUnits).encoded() else {
-                self.release(needsKeyframe: true); return
+                self.release(sequence, needsKeyframe: true); return
             }
             do {
                 try session.send(data, toPeers: [peer], with: .reliable)
-                self.outstanding = sequence
-                let generation = self.generation
-                self.queue.asyncAfter(deadline: .now() + 1) { [weak self, weak session] in
-                    guard let self, self.generation == generation, self.outstanding == sequence else { return }
-                    session?.disconnect() // discard any stale transport data, reconnect at an IDR
-                    self.release(needsKeyframe: true)
-                }
-            } catch { self.release(needsKeyframe: true); session.disconnect() }
+            } catch { self.release(sequence, needsKeyframe: true); session.disconnect() }
         }
     }
 
-    private func release(needsKeyframe: Bool) {
-        outstanding = nil
+    private func release(_ sequence: UInt32, needsKeyframe: Bool) {
         gate.lock()
-        self.needsKeyframe = self.needsKeyframe || needsKeyframe || dropped
-        let recover = self.needsKeyframe
-        busy = false; dropped = false
+        let sentAt = window.pending[sequence]
+        let valid = window.acknowledge(sequence, needsKeyframe: needsKeyframe)
+        let recover = window.needsKeyframe
         gate.unlock()
-        if recover && Date().timeIntervalSince(lastKeyframeRequest) >= 1 {
+        guard valid else { return }
+        if let sentAt { StreamDiagnostics.sample("Preview round trip", milliseconds: (ProcessInfo.processInfo.systemUptime - sentAt) * 1000) }
+        if recover { requestRecovery() }
+    }
+
+    private func requestRecovery() {
+        if Date().timeIntervalSince(lastKeyframeRequest) >= 0.25 {
             lastKeyframeRequest = Date(); onKeyframe?()
         }
+    }
+
+    private func checkDeadline() {
+        guard host else { return }
+        gate.lock()
+        let expired = window.expired(now: ProcessInfo.processInfo.systemUptime)
+        let recover = accepting && window.needsKeyframe
+        if expired { generation &+= 1; accepting = false; window = PreviewSendWindow() }
+        gate.unlock()
+        if expired {
+            // MCSession cannot selectively retract reliable packets already sent.
+            // Drop the session rather than let a recovered link replay its backlog.
+            session?.disconnect(); onDemand?(false)
+        } else if recover { requestRecovery() }
     }
 }
 
@@ -110,13 +130,14 @@ extension RemotePreviewChannel: MCSessionDelegate {
             guard self.session === session else { return }
             switch state {
             case .connected:
+                self.onReset?()
                 self.peer = peerID
-                self.gate.lock(); self.accepting = self.host; self.needsKeyframe = true; self.gate.unlock()
+                self.gate.lock(); self.accepting = self.host; self.window = PreviewSendWindow(); self.gate.unlock()
                 if self.host { self.onDemand?(true); self.onKeyframe?() }
                 else { self.onStatus?("Live Preview") }
             case .notConnected:
-                self.gate.lock(); self.accepting = false; self.gate.unlock()
-                self.release(needsKeyframe: true)
+                self.onReset?()
+                self.gate.lock(); self.generation &+= 1; self.accepting = false; self.window = PreviewSendWindow(); self.gate.unlock()
                 if self.host { self.peer = nil; self.onDemand?(false) }
                 else {
                     self.onStatus?("Reconnecting preview…")
@@ -136,9 +157,8 @@ extension RemotePreviewChannel: MCSessionDelegate {
         queue.async {
             guard self.session === session, self.peer == peerID else { return }
             if self.host {
-                guard data.count == 8, data[0] == 0x46, data[1] == 0x41, data[2] == 1,
-                      self.outstanding == data.readBE(at: 4) else { return }
-                self.release(needsKeyframe: data[3] != 0)
+                guard data.count == 8, data[0] == 0x46, data[1] == 0x41, data[2] == 1 else { return }
+                self.release(data.readBE(at: 4), needsKeyframe: data[3] != 0)
             } else {
                 guard let packet = PreviewPacket.decode(data) else { session.disconnect(); return }
                 let accepted = self.onPacket?(packet) ?? false

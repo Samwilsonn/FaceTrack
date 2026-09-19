@@ -3,7 +3,7 @@
 FacePull is an iOS 17+ camera app for OBS. It captures with AVFoundation, applies
 Vision face framing and optional person-background effects, and displays the
 processed result locally. It has an H.264 RTSP stream for OBS. A second iPhone can run FacePull in Remote Control
-mode without viewing video.
+mode with an optional live video preview (off by default).
 
 ## Validation
 
@@ -27,8 +27,9 @@ with the user's normal iPhone installation process.
 
 The iPhone's raw IP alone is not an OBS media URL. Reserve the iPhone's Wi-Fi
 address in the router for a stable saved source. The access key persists across
-stream restarts but changes if FacePull's app data is removed. No audio is sent;
-select a microphone separately in OBS.
+stream restarts but changes if FacePull's app data is removed. Microphone audio
+can be toggled while streaming; the negotiated audio track carries silence while muted.
+For timing measurements and Wi-Fi recovery checks, see [LATENCY-TESTS.md](LATENCY-TESTS.md).
 
 ## OBS over USB on Windows
 

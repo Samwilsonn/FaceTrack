@@ -622,7 +622,9 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
             guard time + 0.001 >= nextFrameTime, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
             nextFrameTime = max(time, nextFrameTime + 1 / limit)
             do {
+                let processingStarted = ProcessInfo.processInfo.systemUptime
                 let image = try processor.process(buffer, time: time)
+                StreamDiagnostics.sample("Frame processing", milliseconds: (ProcessInfo.processInfo.systemUptime - processingStarted) * 1000)
                 // CIImage retains its source buffer. Keep only the latest preview;
                 // each encoder owns its own bounded admission instead of forcing a
                 // GPU readback and a second upload on the capture queue.

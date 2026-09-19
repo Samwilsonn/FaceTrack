@@ -26,6 +26,7 @@ final class PeerControl: NSObject, ObservableObject {
     private var invited = Set<String>()
     private var authorizedPeer: MCPeerID?
     private var activePeer: MCPeerID?
+    var connectedHostName: String { activePeer?.displayName ?? "Not connected" }
     private var failedPairings: [String: Int] = [:]
     private var challenges: [String: String] = [:]
     private var pairNonces: [String: String] = [:]

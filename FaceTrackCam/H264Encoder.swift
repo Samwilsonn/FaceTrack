@@ -24,6 +24,7 @@ final class H264Encoder {
     private var admitted = 0
     private var generation = 0
     private var forceKeyframe = false
+    private var lastKeyframeTime = -Double.infinity
     private var running = false
 
     func start(size: CGSize, frameRate: Double) {
@@ -37,7 +38,10 @@ final class H264Encoder {
 
     func stop() { queue.async { self.stopInternal() } }
 
-    func requestKeyframe() { queue.async { self.forceKeyframe = true } }
+    func requestKeyframe() {
+        // Coalesce recovery requests without queueing one closure per dropped frame.
+        admission.lock(); forceKeyframe = true; admission.unlock()
+    }
 
     func offer(_ image: CIImage, time: CMTime) {
         // Reject before dispatching: checking only on the encoder queue lets an
@@ -50,13 +54,21 @@ final class H264Encoder {
         queue.async {
             guard self.running, self.generation == generation, let session = self.session,
                   let pool = VTCompressionSessionGetPixelBufferPool(session) else { self.releaseAdmission(generation: generation); return }
+            let age = CMClockGetTime(CMClockGetHostTimeClock()).seconds - time.seconds
+            StreamDiagnostics.sample("Capture to encoder admission", milliseconds: age * 1000)
+            guard age < 0.15 else { self.releaseAdmission(generation: generation); return }
             var buffer: CVPixelBuffer?
             guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer) == kCVReturnSuccess,
                   let buffer else { self.releaseAdmission(generation: generation); return }
             self.context.render(image, to: buffer, bounds: CGRect(origin: .zero, size: self.size), colorSpace: self.colorSpace)
             let duration = CMTime(seconds: 1 / self.frameRate, preferredTimescale: 90_000)
-            let properties = self.forceKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
+            self.admission.lock()
+            let force = self.forceKeyframe || time.seconds - self.lastKeyframeTime >= 1
             self.forceKeyframe = false
+            self.admission.unlock()
+            if force { self.lastKeyframeTime = time.seconds }
+            let properties = force ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
+            let submittedAt = ProcessInfo.processInfo.systemUptime
             let status = VTCompressionSessionEncodeFrame(session, imageBuffer: buffer, presentationTimeStamp: time,
                 duration: duration, frameProperties: properties, infoFlagsOut: nil) { [weak self] status, _, sample in
                 guard let self else { return }
@@ -64,6 +76,7 @@ final class H264Encoder {
                     self.releaseAdmission(generation: generation)
                     guard self.running, self.generation == generation, status == noErr, let sample,
                           let frame = Self.extract(sample) else { return }
+                    StreamDiagnostics.sample("Encoder output", milliseconds: (ProcessInfo.processInfo.systemUptime - submittedAt) * 1000)
                     self.onFrame?(frame)
                 }
             }
@@ -83,13 +96,9 @@ final class H264Encoder {
     private func createSession() -> Bool {
         let width = Int32(size.width), height = Int32(size.height)
         guard width > 0, height > 0 else { return false }
-        let spec: CFDictionary?
+        var specification: [CFString: Any] = [kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true]
         if #available(iOS 17.4, *) {
-            spec = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: kCFBooleanTrue] as CFDictionary
-        } else {
-            // The explicit hardware-selection keys were introduced in iOS 17.4.
-            // VideoToolbox chooses the encoder on older supported releases.
-            spec = nil
+            specification[kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder] = kCFBooleanTrue
         }
         let attributes: [CFString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
@@ -98,18 +107,34 @@ final class H264Encoder {
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
         ]
         var created: VTCompressionSession?
-        let status = VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: width, height: height,
-            codecType: kCMVideoCodecType_H264, encoderSpecification: spec,
+        var status = VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: width, height: height,
+            codecType: kCMVideoCodecType_H264, encoderSpecification: specification as CFDictionary,
             imageBufferAttributes: attributes as CFDictionary, compressedDataAllocator: nil,
             outputCallback: nil, refcon: nil, compressionSessionOut: &created)
+        if status != noErr {
+            // Older devices may not support this mode; preserve the working
+            // hardware real-time path instead of silently losing streaming.
+            if let created { VTCompressionSessionInvalidate(created) }
+            created = nil
+            specification.removeValue(forKey: kVTVideoEncoderSpecification_EnableLowLatencyRateControl)
+            status = VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: width, height: height,
+                codecType: kCMVideoCodecType_H264, encoderSpecification: specification as CFDictionary,
+                imageBufferAttributes: attributes as CFDictionary, compressedDataAllocator: nil,
+                outputCallback: nil, refcon: nil, compressionSessionOut: &created)
+        }
         guard status == noErr, let created else {
             onError?("Hardware H.264 encoder is unavailable (\(status)).")
             return false
         }
         session = created
         let bitrate = max(1_000_000, min(12_000_000, Int(size.width * size.height * frameRate * 0.12)))
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        let realtime = VTSessionSetProperty(created, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        let ordering = VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        guard realtime == noErr, ordering == noErr else {
+            VTCompressionSessionInvalidate(created); session = nil
+            onError?("H.264 real-time configuration failed (\(realtime), \(ordering)).")
+            return false
+        }
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 1))
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrate))
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: Int(frameRate)))
@@ -123,8 +148,9 @@ final class H264Encoder {
         admission.lock()
         generation += 1
         admitted = 0
-        admission.unlock()
         forceKeyframe = false
+        admission.unlock()
+        lastKeyframeTime = -Double.infinity
         if let session { VTCompressionSessionInvalidate(session) }
         session = nil
     }

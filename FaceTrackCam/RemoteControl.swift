@@ -16,6 +16,8 @@ extension CameraModel {
          "exposure": exposure, "exposureLocked": exposureLocked, "temperature": whiteBalanceTemperature,
          "whiteBalanceLocked": whiteBalanceLocked, "background": settings.background.rawValue, "mirror": settings.mirrorStream,
          "microphone": microphoneEnabled,
+         "ready": ready, "starting": starting, "torch": torch, "hasTorch": hasTorch,
+         "frontCamera": frontCamera, "mirrorPreview": mirrorPreview,
          "hasRecentBackgrounds": !recentBackgroundIDs.isEmpty,
          "selectedBackground": selectedBackgroundID?.uuidString ?? "",
          "cameras": cameras.map { ["id": $0.id, "name": $0.name] },
@@ -30,6 +32,11 @@ extension CameraModel {
         guard let action = command["action"] as? String else { return "Missing action" }
         let value = command["value"] as? String ?? ""
         switch action {
+        case "flipCamera": flipCamera()
+        case "torch": toggleTorch()
+        case "mirrorPreview":
+            guard let flag = command["value"] as? Bool else { return "Expected on/off" }
+            mirrorPreview = flag
         case "livePreview":
             guard let flag = command["value"] as? Bool, peer.authorized else { return "Pair a Remote first" }
             setRemotePreviewEnabled(flag)

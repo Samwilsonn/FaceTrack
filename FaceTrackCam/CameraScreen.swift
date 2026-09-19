@@ -2,7 +2,7 @@ import SwiftUI
 import PhotosUI
 import UIKit
 
-private enum ToolPanel: String, Identifiable, CaseIterable, Equatable {
+enum ToolPanel: String, Identifiable, CaseIterable, Equatable {
     case faceTrack = "FaceTrack", background = "Background", exposure = "AE", whiteBalance = "WB", settings = "Settings"
 
     var id: String { rawValue }
@@ -18,7 +18,7 @@ private enum ToolPanel: String, Identifiable, CaseIterable, Equatable {
     static var allCases: [ToolPanel] { [.faceTrack, .background, .exposure, .whiteBalance, .settings] }
 }
 
-private extension View {
+extension View {
     func liquidGlass(cornerRadius: CGFloat = 26) -> some View {
         facePullGlass(in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
     }
@@ -185,36 +185,7 @@ struct CameraScreen: View {
 
     private var controls: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                ForEach(ToolPanel.allCases) { tool in
-                    Button {
-                        withAnimation(.interpolatingSpring(stiffness: 300, damping: 20)) {
-                            if focusedTool == tool {
-                                panel = panel == tool ? nil : tool
-                            } else {
-                                focusedTool = tool
-                                panel = nil
-                            }
-                        }
-                    } label: {
-                        Image(systemName: tool.icon).font(.system(size: 17, weight: .semibold)).rotationEffect(iconAngle)
-                            .frame(width: 44, height: 44)
-                            .glassCapsule(tint: panel == tool ? .white.opacity(0.55) : .clear)
-                            .scaleEffect(pillScale(for: tool))
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .foregroundStyle(panel == tool ? Color.black : Color.white)
-                    .blur(radius: panel != nil && panel != tool ? 1.5 : 0)
-                    .opacity(panel != nil && panel != tool ? 0.55 : 1)
-                    .zIndex(focusedTool == tool ? 1 : 0)
-                    .shadow(color: .white.opacity(panel == tool ? 0.3 : 0), radius: 8)
-                    .accessibilityLabel(tool.rawValue)
-                    .accessibilityAddTraits(panel == tool ? .isSelected : [])
-                    .accessibilityHint(focusedTool == tool ? "Double tap to \(panel == tool ? "close" : "open") menu" : "Double tap to focus")
-                }
-            }
-            .padding(.bottom, 20)
+            CameraToolStrip(panel: $panel, focused: $focusedTool, angle: iconAngle)
             HStack {
                 MijickRoundButton(icon: "mijick-icon-light", active: camera.torch, label: "Toggle torch", rotation: iconAngle) { camera.toggleTorch() }
                     .disabled(!camera.ready || !camera.hasTorch).opacity(camera.hasTorch ? 1 : 0.3)
@@ -290,13 +261,7 @@ struct CameraScreen: View {
 
     private func sliderRow(_ label: String, enabled: Binding<Bool>, value: Binding<Float>,
                            range: ClosedRange<Float>, center: Float, step: Float) -> some View {
-        HStack(spacing: 16) {
-            Toggle(label, isOn: enabled).labelsHidden().fixedSize()
-                .tint(.blue)
-                .onChange(of: enabled.wrappedValue) { _, _ in FaceTrackHaptics.tap() }
-            NativeMagneticSlider(value: value, range: range, defaultValue: center, step: step)
-                .accessibilityLabel(label + " adjustment")
-        }.background(Color.clear)
+        CameraSliderRow(label: label, enabled: enabled, value: value, range: range, center: center, step: step)
     }
 
     private var backgroundPanel: some View {
@@ -424,12 +389,7 @@ struct CameraScreen: View {
 
 
     private func settingRow(_ title: String, _ value: String, _ icon: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon).rotationEffect(iconAngle)
-            VStack(alignment: .leading, spacing: 1) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.headline).fixedSize(horizontal: false, vertical: true) }
-            Spacer()
-            Image(systemName: "chevron.up.chevron.down").font(.caption).foregroundStyle(.secondary)
-        }
+        CameraSettingRow(title: title, value: value, icon: icon, angle: iconAngle)
     }
 
     private var connectionDetails: some View {
