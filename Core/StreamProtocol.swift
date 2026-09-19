@@ -11,9 +11,11 @@ enum StreamProtocol {
 
     static func parse(_ data: Data, token: String, remoteToken: String? = nil) -> HTTPRequestResult {
         guard data.count <= maximumHeaderBytes else { return .rejected(431) }
-        guard let text = String(data: data, encoding: .utf8) else { return .rejected(400) }
-        guard text.contains("\r\n\r\n") else { return .incomplete }
-        let words = text.components(separatedBy: "\r\n")[0].split(separator: " ")
+        let separator = Data("\r\n\r\n".utf8)
+        guard let headerEnd = data.range(of: separator) else { return .incomplete }
+        let headerData = data[..<headerEnd.lowerBound]
+        guard let header = String(data: headerData, encoding: .utf8) else { return .rejected(400) }
+        let words = header.components(separatedBy: "\r\n")[0].split(separator: " ")
         guard words.count == 3, words[2] == "HTTP/1.1" || words[2] == "HTTP/1.0" else { return .rejected(400) }
         guard words[1].hasPrefix("/"), !words[1].hasPrefix("//"),
               let url = URLComponents(string: "http://localhost" + words[1]) else { return .rejected(400) }
@@ -27,15 +29,14 @@ enum StreamProtocol {
               tokens.count == 1, tokens[0].value == expected else { return .rejected(403) }
         guard ["/status", "/remote/state", "/remote/control"].contains(url.path) else { return .rejected(404) }
         if url.path == "/remote/control" {
-            let lines = text.components(separatedBy: "\r\n\r\n")[0].components(separatedBy: "\r\n").dropFirst()
+            let lines = header.components(separatedBy: "\r\n").dropFirst()
             let lengths = lines.filter { $0.lowercased().hasPrefix("content-length:") }
             guard lengths.count == 1, let length = Int(lengths[0].dropFirst(15).trimmingCharacters(in: .whitespaces)),
                   length > 0, length <= 4096,
                   lines.contains(where: { $0.lowercased() == "content-type: application/json" }),
                   !lines.contains(where: { $0.lowercased().hasPrefix("transfer-encoding:") }) else { return .rejected(400) }
-            guard let separator = data.range(of: Data("\r\n\r\n".utf8)) else { return .incomplete }
-            if data.count - separator.upperBound < length { return .incomplete }
-            if data.count - separator.upperBound != length { return .rejected(400) }
+            if data.count - headerEnd.upperBound < length { return .incomplete }
+            if data.count - headerEnd.upperBound != length { return .rejected(400) }
         }
         return .route(url.path)
     }

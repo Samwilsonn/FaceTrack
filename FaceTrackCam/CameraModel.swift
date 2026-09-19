@@ -83,6 +83,7 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
     private var statsTime: TimeInterval = 0
     private var statsFrames = 0
     private var lastErrorTime: TimeInterval = 0
+    private var lastCaptureThermal: ProcessInfo.ThermalState?
     private var orientation: AVCaptureVideoOrientation = .portrait
 
     override init() {
@@ -251,14 +252,11 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
                 self.applyOrientation()
                 self.session.commitConfiguration()
                 try candidate.lockForConfiguration()
-                if candidate.activeFormat.videoSupportedFrameRateRanges.contains(where: { $0.minFrameRate <= 30 && $0.maxFrameRate >= 30 }) {
-                    candidate.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
-                    candidate.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
-                }
                 if candidate.isFocusModeSupported(.continuousAutoFocus) { candidate.focusMode = .continuousAutoFocus }
                 if candidate.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { candidate.whiteBalanceMode = .continuousAutoWhiteBalance }
                 if candidate.hasTorch { candidate.torchMode = .off }
                 candidate.unlockForConfiguration()
+                self.applyCaptureFrameRate()
                 self.applyExposure(bias: bias, locked: locked)
                 self.applyWhiteBalance(temperature: temperature, locked: whiteBalanceIsLocked)
                 self.processor.reset(); self.preview.put(nil)
@@ -290,7 +288,28 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
             }
             if self.processor.settings.format != snapshot.format { self.processor.reset() }
             self.processor.settings = snapshot
+            self.applyCaptureFrameRate()
         }
+    }
+
+    // captureQueue only. Avoid capturing 30 frames just to discard half of them
+    // under thermal pressure, or to deliver the Ultra preset's 24 FPS.
+    private func applyCaptureFrameRate() {
+        guard let device else { return }
+        let requested = processor.settings.quality.frameRate
+        let thermal = ProcessInfo.processInfo.thermalState
+        let rate: Double = thermal == .critical ? 5 : thermal == .serious ? min(15, requested) : requested
+        guard device.activeFormat.videoSupportedFrameRateRanges.contains(where: {
+            $0.minFrameRate <= rate && $0.maxFrameRate >= rate
+        }) else { return }
+        let duration = CMTime(seconds: 1 / rate, preferredTimescale: 600)
+        guard device.activeVideoMinFrameDuration != duration || device.activeVideoMaxFrameDuration != duration else { return }
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+        } catch { report("Camera frame rate could not be updated: \(error.localizedDescription)") }
     }
 
     func relockSubject() { captureQueue.async { self.processor.relockRequested = true } }
@@ -404,7 +423,11 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
 
     func applyPreset(_ preset: CameraPreset) {
         var restored = preset.settings
-        if streaming || starting { restored.quality = settings.quality }
+        if streaming || starting {
+            // A running encoder's dimensions are fixed until stream restart.
+            restored.quality = settings.quality
+            restored.format = settings.format
+        }
         if restored.background == .custom {
             restored.background = .off
             if let asset = backgrounds.first(where: { $0.id == preset.backgroundID }) { selectBackground(asset) }
@@ -485,6 +508,9 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
 
     private func applyOrientation() {
         guard let connection = output.connection(with: .video) else { return }
+        // Temporal stabilization can retain camera frames before our delegate.
+        // Face framing already operates in the processing stage.
+        if connection.isVideoStabilizationSupported { connection.preferredVideoStabilizationMode = .off }
         if connection.isVideoOrientationSupported { connection.videoOrientation = orientation }
         if connection.isVideoMirroringSupported {
             connection.automaticallyAdjustsVideoMirroring = false; connection.isVideoMirrored = false
@@ -515,7 +541,12 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
         let level = UIDevice.current.batteryLevel
         battery = level < 0 ? nil : Int((level * 100).rounded())
         wifiAddress = Self.localAddress()
-        switch ProcessInfo.processInfo.thermalState {
+        let thermalState = ProcessInfo.processInfo.thermalState
+        if lastCaptureThermal != thermalState {
+            lastCaptureThermal = thermalState
+            captureQueue.async { self.applyCaptureFrameRate() }
+        }
+        switch thermalState {
         case .nominal: thermal = "Normal"
         case .fair: thermal = "Warm"
         case .serious: thermal = "Hot · reduced FPS"

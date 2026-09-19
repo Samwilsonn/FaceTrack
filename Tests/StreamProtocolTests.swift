@@ -39,6 +39,14 @@ final class StreamProtocolTests: XCTestCase {
         XCTAssertEqual(remote(header + "{}extra"), .rejected(400))
         XCTAssertEqual(StreamProtocol.parse(Data("GET /remote/state?token HTTP/1.1\r\n\r\n".utf8), token: "video"), .rejected(403))
     }
+    func testFragmentedUTF8CommandBodyWaitsForCompleteBytes() {
+        let header = "POST /remote/control?token=control HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n"
+        var first = Data(header.utf8)
+        first.append(0xc3)
+        XCTAssertEqual(StreamProtocol.parse(first, token: "video", remoteToken: "control"), .incomplete)
+        first.append(0xa9)
+        XCTAssertEqual(StreamProtocol.parse(first, token: "video", remoteToken: "control"), .route("/remote/control"))
+    }
     func testHTTPContentLengthCountsUTF8Bytes() {
         let data = StreamProtocol.response(type: "text/plain", body: Data("✓".utf8))
         XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("Content-Length: 3\r\n"))

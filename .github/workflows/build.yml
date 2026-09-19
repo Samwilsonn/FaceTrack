@@ -11,7 +11,7 @@ concurrency:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - name: Select available Xcode and verify modern iOS SDK
@@ -40,6 +40,27 @@ jobs:
         run: |
           set -o pipefail
           xcodebuild build -project FaceTrackCam.xcodeproj -scheme FaceTrackCam -sdk iphonesimulator -configuration Debug CODE_SIGNING_ALLOWED=NO -derivedDataPath simulator_data | tee simulator-build.log
+      - name: Run UI smoke test on an available iPhone simulator
+        run: |
+          set -o pipefail
+          SIMULATOR_UDID=$(xcrun simctl list devices available -j | ruby -rjson -e '
+            devices = JSON.parse(STDIN.read).fetch("devices", {})
+            candidates = devices.values.flatten.select { |device|
+              device["isAvailable"] == true && device["name"].start_with?("iPhone") && device["udid"]
+            }
+            puts candidates.first["udid"] if candidates.any?
+          ')
+          if [ -z "$SIMULATOR_UDID" ]; then
+            echo "::error::No available iPhone simulator was found for FacePullUITests."
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Running FacePullUITests on simulator $SIMULATOR_UDID"
+          xcodebuild test -project FaceTrackCam.xcodeproj -scheme FaceTrackCam -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -only-testing:FacePullUITests \
+            -resultBundlePath ui-test-results.xcresult \
+            CODE_SIGNING_ALLOWED=NO -derivedDataPath simulator_data | tee ui-test.log
       - name: Verify full-screen launch configuration
         run: /usr/libexec/PlistBuddy -c 'Print :UILaunchScreen' derived_data/Build/Products/Release-iphoneos/FaceTrackCam.app/Info.plist
       - name: Package unsigned IPA
@@ -62,4 +83,28 @@ jobs:
           path: |
             build.log
             simulator-build.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-test-results
+          path: |
+            ui-test-results.xcresult
+            ui-test.log
+          if-no-files-found: warn
+
+  windows-usb:
+    name: Windows USB bridge test
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Test USB bridge handshake and reconnect
+        shell: pwsh
+        run: python USB/test_bridge.py
+      - name: Test USB stream probe
+        shell: pwsh
+        run: python USB/test_stream_probe.py
 

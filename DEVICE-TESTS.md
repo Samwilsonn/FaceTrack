@@ -10,6 +10,8 @@ These checks have not been completed by the coding agent. They require your devi
 | H.264 Wi-Fi source | 30-minute OBS Media Source test at each quality, with actual dimensions, FPS, latency, and dropped frames recorded |
 | H.264 USB source | With Wi-Fi disabled, OBS receives video from the saved loopback RTSP URL |
 | Hardware encoder | VideoToolbox reports hardware use on iPhone 13 Pro; record heat and battery drain during H.264 streaming |
+| Capture FPS after quality/thermal changes | High/Standard request 30 FPS; Ultra requests 24 FPS. Supported devices reduce capture with the Hot processing limit and return to the selected rate after cooling. Compare exposure and motion cadence before/after switching lenses and quality |
+| Live preset format | Loading a preset with different orientation/quality while live preserves the running encoder dimensions; after stopping, the preset can change them |
 | Switch front/rear and physical lenses | Preview and OBS recover; exposure controls remain usable |
 | Rotate phone in both output formats | Upright frame, fixed selected dimensions, no stretch |
 | Mirror settings with visible printed text | Preview and stream follow their separate settings |

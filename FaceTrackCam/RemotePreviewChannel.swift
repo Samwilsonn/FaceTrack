@@ -20,6 +20,10 @@ final class RemotePreviewChannel: NSObject {
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
     private var peer: MCPeerID?
+    private var pendingInvite: MCPeerID?
+    private var discoveredPeer: MCPeerID?
+    private var inviteTimeout: DispatchWorkItem?
+    private var inviteAttempt = 0
     private var token = ""
     private var target = ""
     private var sequence: UInt32 = 0
@@ -62,6 +66,10 @@ final class RemotePreviewChannel: NSObject {
         browser?.stopBrowsingForPeers(); browser = nil
         session?.delegate = nil; session?.disconnect(); session = nil
         peer = nil
+        pendingInvite = nil
+        discoveredPeer = nil
+        inviteTimeout?.cancel(); inviteTimeout = nil
+        inviteAttempt &+= 1
         if host { onDemand?(false) }
     }
 
@@ -100,8 +108,49 @@ final class RemotePreviewChannel: NSObject {
             }
             do {
                 try session.send(data, toPeers: [peer], with: .reliable)
-            } catch { self.release(sequence, needsKeyframe: true); session.disconnect() }
+            } catch {
+                self.release(sequence, needsKeyframe: true)
+                self.gate.lock()
+                let current = self.session === session && self.generation == generation
+                if current {
+                    self.generation &+= 1
+                    self.accepting = false
+                    self.window = PreviewSendWindow()
+                    self.peer = nil
+                    self.pendingInvite = nil
+                    self.discoveredPeer = nil
+                    self.inviteTimeout?.cancel(); self.inviteTimeout = nil
+                    self.inviteAttempt &+= 1
+                }
+                self.gate.unlock()
+                if current {
+                    if self.host { self.onDemand?(false) }
+                    session.disconnect()
+                }
+            }
         }
+    }
+
+    private func inviteIfNeeded(_ peerID: MCPeerID, session: MCSession, generation: Int) {
+        guard !host, self.session === session, browser != nil, peer == nil,
+              pendingInvite == nil, discoveredPeer == peerID else { return }
+        pendingInvite = peerID
+        inviteAttempt &+= 1
+        let attempt = inviteAttempt
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.session === session,
+                  self.generation == generation,
+                  self.pendingInvite == peerID,
+                  self.inviteAttempt == attempt else { return }
+            self.pendingInvite = nil
+            self.inviteTimeout = nil
+            self.inviteIfNeeded(peerID, session: session, generation: generation)
+        }
+        inviteTimeout?.cancel()
+        inviteTimeout = timeout
+        queue.asyncAfter(deadline: .now() + 5.5, execute: timeout)
+        browser?.invitePeer(peerID, to: session, withContext: Data(token.utf8), timeout: 5)
     }
 
     private func release(_ sequence: UInt32, needsKeyframe: Bool) {
@@ -140,19 +189,27 @@ extension RemotePreviewChannel: MCSessionDelegate {
             case .connected:
                 self.onReset?()
                 self.peer = peerID
+                self.pendingInvite = nil
+                self.inviteTimeout?.cancel(); self.inviteTimeout = nil
+                self.discoveredPeer = peerID
                 self.gate.lock(); self.accepting = self.host; self.window = PreviewSendWindow(); self.gate.unlock()
                 if self.host { self.onDemand?(true); self.onKeyframe?() }
                 else { self.onStatus?("Live Preview") }
             case .notConnected:
                 self.onReset?()
                 self.gate.lock(); self.generation &+= 1; self.accepting = false; self.window = PreviewSendWindow(); self.gate.unlock()
-                if self.host { self.peer = nil; self.onDemand?(false) }
+                self.peer = nil
+                self.pendingInvite = nil
+                self.inviteTimeout?.cancel(); self.inviteTimeout = nil
+                if self.host { self.onDemand?(false) }
                 else {
                     self.onStatus?("Reconnecting preview…")
                     let generation = self.generation
                     self.queue.asyncAfter(deadline: .now() + 0.5) {
-                        guard self.generation == generation, self.session === session else { return }
-                        self.browser?.invitePeer(peerID, to: session, withContext: Data(self.token.utf8), timeout: 5)
+                        guard self.generation == generation, self.session === session,
+                              self.browser != nil, self.peer == nil,
+                              self.discoveredPeer == peerID else { return }
+                        self.inviteIfNeeded(peerID, session: session, generation: generation)
                     }
                 }
             default: break
@@ -199,11 +256,19 @@ extension RemotePreviewChannel: MCNearbyServiceBrowserDelegate {
         queue.async {
             guard self.browser === browser, peerID.displayName == self.target, let session = self.session,
                   self.peer == nil else { return }
-            self.peer = peerID
-            browser.invitePeer(peerID, to: session, withContext: Data(self.token.utf8), timeout: 5)
+            self.discoveredPeer = peerID
+            self.inviteIfNeeded(peerID, session: session, generation: self.generation)
         }
     }
-    func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {}
+    func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
+        queue.async {
+            guard self.browser === browser, self.discoveredPeer == peerID else { return }
+            self.discoveredPeer = nil
+            self.pendingInvite = nil
+            self.inviteTimeout?.cancel(); self.inviteTimeout = nil
+            self.inviteAttempt &+= 1
+        }
+    }
     func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
         onStatus?("Preview unavailable: \(error.localizedDescription)")
     }

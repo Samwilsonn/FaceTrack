@@ -12,6 +12,13 @@ made latency worse; keep it ON on that PC. OBS opens its decoder separately from
 these demuxer options, so `flags=low_delay` here is not a verified decoder fix.
 See LATENCY-AUDIT.md for the evidence and remaining measurement limits.
 
+For this release candidate, run `USB/Measure-Stream.ps1` against the copied RTSP URL
+for 15 seconds, first without OBS and then alongside OBS. Compare Wi-Fi and USB.
+Save the aggregate JSON report (no URL or images are printed). `headersInSDP`
+should normally be true after the phone stream has started; immediate connections
+can safely use the in-band-header fallback. The test only measures arrival drift,
+not a constant delay or decoder/display latency. See USB/SETUP.md for the command.
+
 - Reconnect OBS after upgrading; confirm video-only negotiation and compare delay
   against the previous build at the same quality. No mic or silent AAC track exists.
 - Interrupt Wi-Fi briefly, restore it, and confirm recovery to current time rather

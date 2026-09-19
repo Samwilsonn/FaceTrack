@@ -11,14 +11,14 @@ final class H264RTSPServer {
         var playing = false
         var awaitingKeyframe = true
         var sending = false
-        var videoSendStarted: Date?
-        var lastClockReport = Date.distantPast
+        var videoSendStarted: TimeInterval?
+        var lastClockReport = -Double.infinity
         var sequence = UInt16.random(in: 0...UInt16.max)
         var videoChannel: UInt8?
         var videoControl = ""
         var videoPackets: UInt32 = 0
         var videoOctets: UInt32 = 0
-        var lastProgress = Date()
+        var lastProgress = ProcessInfo.processInfo.systemUptime
         let sessionID = UUID().uuidString
         init(_ connection: NWConnection) { self.connection = connection }
     }
@@ -37,6 +37,11 @@ final class H264RTSPServer {
     private var deliveryPending = false
     private var deliveryDropped = false
     private var hasViewers = false
+    private var needsFormat = false
+    private var encoderReady = false
+    private var generation = 0
+    private var videoFormat: VideoStreamDescription.Format?
+    private var frameRate = 30
     private var latestVideoTimestamp: UInt32?
     private var listener: NWListener?
     private var clients: [UUID: Client] = [:]
@@ -53,8 +58,20 @@ final class H264RTSPServer {
         remotePreview.onKeyframe = { [weak self] in self?.encoder.requestKeyframe() }
         encoder.onFrame = { [weak self] frame in
             guard let self else { return }
+            self.deliveryGate.lock()
+            guard self.encoderReady else { self.deliveryGate.unlock(); return }
+            let generation = self.generation
+            self.deliveryGate.unlock()
             self.remotePreview.offer(frame)
             self.deliveryGate.lock()
+            guard self.generation == generation else { self.deliveryGate.unlock(); return }
+            if self.needsFormat, let format = VideoStreamDescription.Format(units: frame.nalUnits) {
+                self.needsFormat = false
+                self.queue.async {
+                    guard self.generation == generation else { return }
+                    self.videoFormat = format
+                }
+            }
             guard self.hasViewers else { self.deliveryGate.unlock(); return }
             guard !self.deliveryPending else {
                 self.deliveryDropped = true
@@ -63,6 +80,7 @@ final class H264RTSPServer {
             self.deliveryPending = true
             self.deliveryGate.unlock()
             self.queue.async {
+                guard self.generation == generation else { return }
                 self.send(frame)
                 self.deliveryGate.lock()
                 let dropped = self.deliveryDropped
@@ -95,7 +113,21 @@ final class H264RTSPServer {
         queue.async {
             self.stopInternal()
             self.token = token
-            self.encoder.start(size: size, frameRate: frameRate)
+            self.frameRate = Int(frameRate)
+            let generation = self.generation
+            self.encoder.start(size: size, frameRate: frameRate) { [weak self] ready in
+                guard let self else { return }
+                self.queue.async {
+                    guard self.generation == generation else { return }
+                    guard ready else {
+                        self.stopInternal()
+                        self.reportStatus(false, error: "H.264 encoder could not start. Retry the stream.")
+                        return
+                    }
+                    self.deliveryGate.lock(); self.encoderReady = true; self.deliveryGate.unlock()
+                    if self.running { self.reportStatus(true) }
+                }
+            }
             do {
                 let tcp = NWProtocolTCP.Options()
                 tcp.noDelay = true
@@ -108,8 +140,11 @@ final class H264RTSPServer {
                     switch state {
                     case .ready:
                         self.running = true
+                        // Encode only enough real camera frames to obtain this
+                        // session's headers before OBS asks for its description.
+                        self.deliveryGate.lock(); self.needsFormat = self.videoFormat == nil; self.deliveryGate.unlock()
                         self.updatePreview()
-                        self.reportStatus(true)
+                        if self.encoderReady { self.reportStatus(true) }
                     case .failed(let error):
                         self.stopInternal()
                         self.reportStatus(false, error: "RTSP server stopped: \(error.localizedDescription)")
@@ -122,7 +157,10 @@ final class H264RTSPServer {
                 timer.schedule(deadline: .now() + 0.1, repeating: 0.1, leeway: .milliseconds(10))
                 timer.setEventHandler { [weak self] in self?.expireClients() }
                 timer.resume(); self.timer = timer
-            } catch { self.reportStatus(false, error: "RTSP server could not start: \(error.localizedDescription)") }
+            } catch {
+                self.stopInternal()
+                self.reportStatus(false, error: "RTSP server could not start: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -130,8 +168,8 @@ final class H264RTSPServer {
 
     func offer(_ image: CIImage, time: CMTime) {
         deliveryGate.lock()
-        let needed = hasViewers || hasPreview
-        if needed && time.isValid {
+        let needed = encoderReady && (hasViewers || hasPreview || needsFormat)
+        if needed && time.isNumeric && time.seconds.isFinite && time.seconds >= 0 {
             latestVideoTimestamp = UInt32(truncatingIfNeeded: Int64((time.seconds * 90_000).rounded()))
         }
         deliveryGate.unlock()
@@ -144,8 +182,13 @@ final class H264RTSPServer {
         running = false
         remotePreview.stop()
         deliveryGate.lock()
+        generation &+= 1
+        encoderReady = false
+        needsFormat = false
+        deliveryPending = false; deliveryDropped = false
         latestVideoTimestamp = nil
         deliveryGate.unlock()
+        videoFormat = nil
         listener?.stateUpdateHandler = nil
         listener?.newConnectionHandler = nil
         listener?.cancel(); listener = nil
@@ -221,9 +264,11 @@ final class H264RTSPServer {
         switch method {
         case "DESCRIBE":
             guard url.path == "/facepull" else { reply(id, cseq: cseq, status: "400 Bad Request"); return }
-            let videoControl = uri.replacingOccurrences(of: "?token=", with: "/trackID=0?token=")
+            guard let videoControl = VideoStreamDescription.videoControlURL(uri) else {
+                reply(id, cseq: cseq, status: "400 Bad Request"); return
+            }
             client.videoControl = videoControl
-            let sdp = VideoStreamDescription.sdp(control: videoControl)
+            let sdp = VideoStreamDescription.sdp(control: videoControl, frameRate: frameRate, format: videoFormat)
             reply(id, cseq: cseq, extra: "Content-Base: \(uri)\r\nContent-Type: application/sdp\r\n", body: sdp)
         case "SETUP":
             let transport = lines.first(where: { $0.lowercased().hasPrefix("transport:") })?.lowercased() ?? ""
@@ -245,7 +290,7 @@ final class H264RTSPServer {
             if client.videoChannel != nil { info.append("url=\(client.videoControl);seq=\(client.sequence);rtptime=\(LiveStreamClock.ticks(hostTime, rate: 90_000))") }
             reply(id, cseq: cseq, extra: "Session: \(client.sessionID)\r\nRange: npt=0.000-\r\nRTP-Info: \(info.joined(separator: ","))\r\n")
             client.playing = true; client.awaitingKeyframe = true
-            client.lastProgress = Date()
+            client.lastProgress = ProcessInfo.processInfo.systemUptime
             sendClockReport(id, client: client)
             reportViewers()
             encoder.requestKeyframe()
@@ -295,16 +340,16 @@ final class H264RTSPServer {
             let packetCount = UInt32(client.sequence &- previousSequence)
             client.videoPackets &+= packetCount
             client.videoOctets &+= UInt32(max(0, packet.count - Int(packetCount) * 16))
-            client.videoSendStarted = Date()
+            client.videoSendStarted = ProcessInfo.processInfo.systemUptime
             client.connection.send(content: packet, completion: .contentProcessed { [weak self, weak client] error in
                 guard let self, let client, self.clients[id] === client else { return }
                 if error != nil { self.remove(id) }
                 else {
-                    let elapsed = client.videoSendStarted.map { Date().timeIntervalSince($0) } ?? 0
+                    let now = ProcessInfo.processInfo.systemUptime
+                    let elapsed = client.videoSendStarted.map { now - $0 } ?? 0
                     StreamDiagnostics.sample("TCP write processed", milliseconds: elapsed * 1000)
-                    if RTSPSendDeadline.isExpired(startedAt: client.videoSendStarted?.timeIntervalSinceReferenceDate,
-                                                   now: Date().timeIntervalSinceReferenceDate) { self.remove(id); return }
-                    client.sending = false; client.videoSendStarted = nil; client.lastProgress = Date()
+                    if RTSPSendDeadline.isExpired(startedAt: client.videoSendStarted, now: now) { self.remove(id); return }
+                    client.sending = false; client.videoSendStarted = nil; client.lastProgress = now
                     if client.awaitingKeyframe { self.encoder.requestKeyframe() }
                 }
             })
@@ -320,23 +365,22 @@ final class H264RTSPServer {
     }
 
     private func expireClients() {
-        let now = Date()
+        let now = ProcessInfo.processInfo.systemUptime
         let expired = clients.filter { entry in
             let client = entry.value
             // Available TCP buffer space is not queued-byte age or evidence of
             // a stall. It can stay small on a healthy, actively draining socket.
-            return now.timeIntervalSince(client.lastProgress) > 6 ||
-                RTSPSendDeadline.isExpired(startedAt: client.videoSendStarted?.timeIntervalSinceReferenceDate,
-                                           now: now.timeIntervalSinceReferenceDate)
+            return now - client.lastProgress > 6 ||
+                RTSPSendDeadline.isExpired(startedAt: client.videoSendStarted, now: now)
         }.map(\.key)
         expired.forEach(remove)
-        for (id, client) in clients where client.playing && !client.sending && now.timeIntervalSince(client.lastClockReport) >= 1 {
+        for (id, client) in clients where client.playing && !client.sending && now - client.lastClockReport >= 1 {
             sendClockReport(id, client: client)
         }
     }
 
     private func sendClockReport(_ id: UUID, client: Client) {
-        client.lastClockReport = Date()
+        client.lastClockReport = ProcessInfo.processInfo.systemUptime
         let host = CMClockGetTime(CMClockGetHostTimeClock()).seconds
         let wall = Date().timeIntervalSince1970
         var report = Data()
@@ -362,46 +406,5 @@ final class H264RTSPServer {
 
     private func reportStatus(_ active: Bool, error: String? = nil) {
         DispatchQueue.main.async { [weak self] in self?.onStatus?(active, error) }
-    }
-}
-
-private enum RTPH264 {
-    static func packetize(_ unit: Data, sequence: inout UInt16, timestamp: UInt32,
-                          ssrc: UInt32, channel: UInt8, marker: Bool) -> Data {
-        guard let first = unit.first else { return Data() }
-        let bytes = [UInt8](unit)
-        let payloadSize = 1200
-        var output = Data()
-        if bytes.count <= payloadSize {
-            output.append(packet(Data(bytes), sequence: &sequence, timestamp: timestamp, ssrc: ssrc, channel: channel, marker: marker))
-        } else {
-            let indicator = (first & 0xe0) | 28
-            let kind = first & 0x1f
-            var offset = 1
-            while offset < bytes.count {
-                let count = min(payloadSize - 2, bytes.count - offset)
-                let start = offset == 1, end = offset + count == bytes.count
-                var fragment = Data([indicator, kind | (start ? 0x80 : 0) | (end ? 0x40 : 0)])
-                fragment.append(contentsOf: bytes[offset..<(offset + count)])
-                output.append(packet(fragment, sequence: &sequence, timestamp: timestamp, ssrc: ssrc, channel: channel, marker: marker && end))
-                offset += count
-            }
-        }
-        return output
-    }
-
-    private static func packet(_ payload: Data, sequence: inout UInt16, timestamp: UInt32,
-                               ssrc: UInt32, channel: UInt8, marker: Bool) -> Data {
-        let length = payload.count + 12
-        var result = Data([0x24, channel, UInt8(length >> 8), UInt8(length & 0xff),
-                           0x80, marker ? 0xe0 : 0x60,
-                           UInt8(sequence >> 8), UInt8(sequence & 0xff),
-                           UInt8(timestamp >> 24), UInt8((timestamp >> 16) & 0xff),
-                           UInt8((timestamp >> 8) & 0xff), UInt8(timestamp & 0xff),
-                           UInt8(ssrc >> 24), UInt8((ssrc >> 16) & 0xff),
-                           UInt8((ssrc >> 8) & 0xff), UInt8(ssrc & 0xff)])
-        result.append(payload)
-        sequence &+= 1
-        return result
     }
 }

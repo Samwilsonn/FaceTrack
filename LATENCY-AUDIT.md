@@ -1,5 +1,62 @@
 # Targeted latency audit
 
+## Release-candidate follow-up (2.2.1, build 5)
+
+Current baseline is `502e3a0` on `codex/mijick-obs-streaming`. Audio is already
+removed. The user reports that removal did not resolve the approximately one-second
+delay. No synchronized iPhone/OBS trace is available, so the steady-delay root cause
+is still unproven. Windows denied access to saved OBS settings/logs even after a
+read-access request; no current OBS configuration was inferred from those files.
+
+Correction to the earlier conversational diagnosis: OBS's 30-frame async queue is
+a **capacity**, not evidence of a fixed one-second buffer. A queue-size constant
+cannot establish occupancy or display delay on this PC. OBS's Media Source still
+does stream probing, decoding and timestamp-based playback when Network Buffering
+is zero. Its async queue alone is not a confirmed cause.
+
+Concrete changes in this pass:
+
+- Request VideoToolbox MaxFrameDelayCount 0, falling back to the previous 1 if
+  unsupported. Apple defines this as the compression window, so the potential
+  saving is frame-scale; it is not evidence of a one-second fix.
+- Cache real encoder SPS/PPS from a few initial camera frames and include them,
+  the actual H.264 profile/level and configured frame rate in RTSP SDP. This avoids
+  leaving all format discovery to incoming packets. An immediate DESCRIBE before
+  headers exist retains the compatible in-band-header fallback. No black/dummy
+  frames or continuous idle encoding were added.
+- Reject nonnumeric capture timestamps; recover unusable encoder output at a
+  keyframe. Check encoder preparation and propagate startup failure instead of
+  advertising a ready stream. Clear stale delivery/header state on restart.
+- Disable temporal capture stabilization explicitly. Its prior active mode was
+  not measured; this prevents a potential capture-side buffering stage.
+- Use monotonic time for RTSP write/idle watchdogs, keeping existing deadlines.
+- Preserve both dimensions and quality when applying a preset during streaming.
+- Match supported camera capture FPS to quality/thermal processing limits, avoiding
+  excess captures at 24 FPS or while heat limits processing to 15/5 FPS. Reapply the
+  limit after changing lenses or the capture preset. Physical heat/FPS results are
+  not measured in this environment.
+- Fix remote preview reconnect/invitation state and stale control-peer/revision
+  handling. Keep existing decoder and bounded flight-window semantics.
+- Add a Windows RTSP arrival probe and protocol/packetization regression coverage.
+
+Primary references: [Apple MaxFrameDelayCount](https://developer.apple.com/documentation/videotoolbox/kvtcompressionpropertykey_maxframedelaycount),
+[Apple low-latency rate control](https://developer.apple.com/documentation/videotoolbox/kvtvideoencoderspecification_enablelowlatencyratecontrol),
+[OBS 32.2.2 playback](https://github.com/obsproject/obs-studio/blob/32.2.2/shared/media-playback/media-playback/media.c),
+[OBS 32.2.2 async source](https://github.com/obsproject/obs-studio/blob/32.2.2/libobs/obs-source.c),
+[FFmpeg 8 SDP framerate parsing](https://github.com/FFmpeg/FFmpeg/blob/n8.0/libavformat/rtsp.c).
+
+The remaining discriminating checks are the new probe's arrival-drift report,
+same-run capture-to-RTP Instruments timings, and a filmed timer/OBS comparison.
+Low arrival drift does not exclude constant delay. No changes to RTP clock origin,
+TCP transport, selected resolution/bitrate, or OBS installation were made.
+See RELEASE-NOTES.md for validation status and the complete file list.
+
+## Historical audit below (earlier passes)
+
+The remaining sections describe earlier work and its verification status at that
+time. They are not a statement that audio is still active or that those earlier
+measurements have since been performed.
+
 Update: the user subsequently requested a video-only app. The microphone, silent
 AAC track and audio transport have now been removed from active sources; preserved
 implementations are in `ArchivedAudio/`, outside the build. Audio observations

@@ -22,8 +22,9 @@ with the user's normal iPhone installation process.
 3. Add an OBS **Media Source**, turn off **Local File**, and paste the complete URL
    into **Input**. Set **Network Buffering** to **0 MB** to avoid OBS's default
    2 MB live-video buffer. Set input format to `rtsp` and FFmpeg options to
-   `rtsp_transport=tcp fflags=nobuffer flags=low_delay` if OBS exposes those fields.
-   Save the source.
+   `rtsp_transport=tcp fflags=nobuffer` if OBS exposes those fields.
+   Keep hardware decoding enabled on the tested PC; disabling it increased delay.
+   Save the source. These options do not disable every decoder/display queue.
 
 The iPhone's raw IP alone is not an OBS media URL. Reserve the iPhone's Wi-Fi
 address in the router for a stable saved source. The access key persists across
@@ -46,8 +47,8 @@ Physical USB and OBS reconnect behavior still require acceptance testing.
 Open Settings on the Host to see its six-digit pairing code. On the second phone,
 choose **Use as Remote Control**, choose the discovered Host, and enter the code.
 Subsequent local-network connections use the saved per-device credential. Control
-messages use an encrypted Multipeer Connectivity session; camera images are not
-sent to the Remote. Both devices need local-network permission. Remote selection of
+messages use an encrypted Multipeer Connectivity session. Video uses a separate
+encrypted session only while Live Preview is enabled. Both devices need local-network permission. Remote selection of
 an already saved Host background is supported; transferring a new photo from the
 Remote is not yet part of this build.
 
@@ -62,4 +63,11 @@ phone stops camera capture; return to the foreground before restarting the strea
 Mijick visual assets are used under the license in [NOTICE.md](NOTICE.md). The
 capture and streaming engine is dedicated to FacePull rather than Mijick's camera
 manager. See [project.yml](project.yml) for the build configuration.
+
+## Release candidate 2.2.1
+
+See [RELEASE-NOTES.md](RELEASE-NOTES.md) for the complete changes and outstanding
+release checks. The reported one-second OBS delay has not yet been measured after
+these changes. [USB/Measure-Stream.ps1](USB/Measure-Stream.ps1) can measure RTSP
+arrival drift on Windows without changing OBS; it cannot measure OBS display delay.
 

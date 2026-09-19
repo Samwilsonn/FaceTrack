@@ -28,8 +28,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.anmol.FaceTrackCam
-        CURRENT_PROJECT_VERSION: "4"
-        MARKETING_VERSION: "2.2"
+        CURRENT_PROJECT_VERSION: "5"
+        MARKETING_VERSION: "2.2.1"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

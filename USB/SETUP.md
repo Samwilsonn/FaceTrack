@@ -6,7 +6,7 @@
 2. Keep this USB folder together. Right-click `Setup-USB.ps1` → **Run with PowerShell**, or run `powershell -NoProfile -ExecutionPolicy Bypass -File .\Setup-USB.ps1` from this folder. It copies the bridge into your Windows user profile and adds automatic startup at login. No Python or iproxy download is needed.
 3. Install the updated FacePull build. Choose **High · 1280 × 720 · 30 fps** as a starting point and tap the shutter to start streaming.
 4. In **Settings → Connect**, copy **USB · H.264**. It looks like `rtsp://127.0.0.1:18554/facepull?token=YOUR_SAVED_KEY`. The key persists across app launches and stream restarts; removing app data can change it.
-5. In OBS add **Media Source**, uncheck **Local File**, and paste the complete URL into **Input**. Set **Network Buffering** to **0 MB**; OBS defaults to 2 MB, which adds webcam delay. Set **Input Format** to `rtsp` and **FFmpeg Options** to `rtsp_transport=tcp fflags=nobuffer flags=low_delay` if those fields are available. Enable restart when the source becomes active. Save the source. Video has no audio; add your microphone separately.
+5. In OBS add **Media Source**, uncheck **Local File**, and paste the complete URL into **Input**. Set **Network Buffering** to **0 MB**. Set **Input Format** to `rtsp` and **FFmpeg Options** to `rtsp_transport=tcp fflags=nobuffer` if those fields are available. Keep hardware decoding enabled on the tested PC. Enable restart when the source becomes active. Save the source. Video has no audio; add your microphone separately. Zero network buffering does not disable all decoder/display queues.
 
 ## Each session
 
@@ -44,4 +44,23 @@ Custom opens a library without changing the background. Select an image or choos
 Open `shell:startup` in Windows and remove **FacePull USB**. Restart Windows to stop the existing bridge. Installed files are in `%LOCALAPPDATA%\FacePull\USB`.
 
 References: [OBS Media Sources](https://obsproject.com/kb/media-sources), [Apple iOS compatibility](https://support.apple.com/guide/iphone/iphe3fa5df43/ios), [usbmux protocol](https://github.com/libimobiledevice/libusbmuxd), [Windows device-service prerequisites](https://doronz88.github.io/pymobiledevice3/guides/troubleshooting/).
+
+## Measure a delayed stream
+
+With the phone streaming, run from this folder:
+
+```powershell
+$streamURL = Read-Host 'Paste the full FacePull RTSP URL'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Measure-Stream.ps1 -Url $streamURL -DurationSeconds 15
+```
+
+The report includes received FPS, startup time, keyframes, sequence gaps and
+additional arrival delay. It excludes the URL/key and camera images. Measure once
+with OBS disconnected, then again with OBS connected at the same quality. The probe
+itself adds one viewer and therefore network load. Repeat over USB if available.
+
+Increasing arrival delay indicates accumulating delay before the probe receives
+the video. A low value does **not** exclude a fixed network delay or latency before
+encoding. This is not glass-to-glass latency: film a visible millisecond timer and
+the OBS display together to measure that. See `../LATENCY-TESTS.md`.
 

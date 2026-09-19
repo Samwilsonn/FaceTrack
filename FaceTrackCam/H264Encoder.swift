@@ -27,12 +27,13 @@ final class H264Encoder {
     private var lastKeyframeTime = -Double.infinity
     private var running = false
 
-    func start(size: CGSize, frameRate: Double) {
+    func start(size: CGSize, frameRate: Double, completion: ((Bool) -> Void)? = nil) {
         queue.async {
             self.stopInternal()
             self.size = size
             self.frameRate = frameRate
             self.running = self.createSession()
+            completion?(self.running)
         }
     }
 
@@ -44,6 +45,7 @@ final class H264Encoder {
     }
 
     func offer(_ image: CIImage, time: CMTime) {
+        guard time.isNumeric, time.seconds.isFinite, time.seconds >= 0 else { return }
         // Reject before dispatching: checking only on the encoder queue lets an
         // arbitrary backlog of stale CIImages retain camera buffers.
         admission.lock()
@@ -76,14 +78,21 @@ final class H264Encoder {
                 guard let self else { return }
                 self.queue.async {
                     self.releaseAdmission(generation: generation)
-                    guard self.running, self.generation == generation, status == noErr, let sample,
-                          let frame = Self.extract(sample) else { return }
+                    guard self.running, self.generation == generation else { return }
+                    guard status == noErr, let sample, let frame = Self.extract(sample) else {
+                        // An unusable encoded frame must not leave receivers on a
+                        // reference chain that depends on data they never got.
+                        self.requestKeyframe()
+                        StreamDiagnostics.status("VT output rejected", code: status)
+                        return
+                    }
                     StreamDiagnostics.sample("Encoder output", milliseconds: (ProcessInfo.processInfo.systemUptime - submittedAt) * 1000)
                     self.onFrame?(frame)
                 }
             }
             if status != noErr {
                 self.releaseAdmission(generation: generation)
+                self.requestKeyframe()
                 self.onError?("H.264 encoder rejected a frame (\(status)).")
             }
         }
@@ -141,15 +150,25 @@ final class H264Encoder {
             onError?("H.264 real-time configuration failed (\(realtime), \(ordering)).")
             return false
         }
-        StreamDiagnostics.status("VT max-frame-delay property", code:
-            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 1)))
+        let delay = VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 0))
+        StreamDiagnostics.status("VT zero-frame-delay property", code: delay)
+        if delay != noErr {
+            StreamDiagnostics.status("VT one-frame-delay fallback", code:
+                VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: NSNumber(value: 1)), fallback: true)
+        }
         StreamDiagnostics.status("VT bitrate property", code:
             VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: bitrate)))
         StreamDiagnostics.status("VT keyframe-interval property", code:
             VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: Int(frameRate))))
         StreamDiagnostics.status("VT expected-FPS property", code:
             VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: Int(frameRate))))
-        StreamDiagnostics.status("VT prepare", code: VTCompressionSessionPrepareToEncodeFrames(created))
+        let prepared = VTCompressionSessionPrepareToEncodeFrames(created)
+        StreamDiagnostics.status("VT prepare", code: prepared)
+        guard prepared == noErr else {
+            VTCompressionSessionInvalidate(created); session = nil
+            onError?("H.264 encoder preparation failed (\(prepared)).")
+            return false
+        }
         return true
     }
 
@@ -168,7 +187,7 @@ final class H264Encoder {
     private static func extract(_ sample: CMSampleBuffer) -> Frame? {
         guard let block = CMSampleBufferGetDataBuffer(sample) else { return nil }
         let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-        guard pts.isValid else { return nil }
+        guard pts.isNumeric, pts.seconds.isFinite, pts.seconds >= 0 else { return nil }
         let stamp = UInt32(truncatingIfNeeded: Int64((pts.seconds * 90_000).rounded()))
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[CFString: Any]]
         let key = attachments?.first?[kCMSampleAttachmentKey_NotSync] as? Bool != true

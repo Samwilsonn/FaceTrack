@@ -34,6 +34,7 @@ final class PeerControl: NSObject, ObservableObject {
     private var verifiedHost = false
     private var enteredCode = ""
     private var revision = 0
+    private var receivedRevision = 0
     private var lastState = Data()
 
     init(role: Role) {
@@ -63,6 +64,7 @@ final class PeerControl: NSObject, ObservableObject {
         guard role == .remote, !invited.contains(peer.displayName) else { return }
         if let activePeer, activePeer != peer { session.disconnect(); authorized = false; verifiedHost = false }
         activePeer = peer
+        receivedRevision = 0
         invited.insert(peer.displayName)
         browser?.invitePeer(peer, to: session, withContext: nil, timeout: 20)
     }
@@ -89,19 +91,33 @@ final class PeerControl: NSObject, ObservableObject {
 
     func publish(_ snapshot: [String: Any]) {
         guard role == .host, authorized, let data = try? JSONSerialization.data(withJSONObject: snapshot, options: .sortedKeys),
-              data != lastState else { return }
-        lastState = data; revision += 1
-        if let authorizedPeer { send(["type": "state", "revision": revision, "state": snapshot], to: authorizedPeer) }
+              data != lastState,
+              let authorizedPeer,
+              session.connectedPeers.contains(authorizedPeer) else { return }
+        let nextRevision = revision + 1
+        guard send(["type": "state", "revision": nextRevision, "state": snapshot], to: authorizedPeer) else { return }
+        revision = nextRevision
+        lastState = data
     }
 
-    private func send(_ message: [String: Any], to peer: MCPeerID? = nil) {
+    @discardableResult
+    private func send(_ message: [String: Any], to peer: MCPeerID? = nil) -> Bool {
         let targets = peer.map { [$0] } ?? (role == .remote ? activePeer.map { [$0] } ?? [] : session.connectedPeers)
-        guard !targets.isEmpty, let data = try? JSONSerialization.data(withJSONObject: message) else { return }
-        do { try session.send(data, toPeers: targets, with: .reliable) }
-        catch { self.error = error.localizedDescription }
+        guard !targets.isEmpty,
+              targets.allSatisfy(session.connectedPeers.contains),
+              let data = try? JSONSerialization.data(withJSONObject: message) else { return false }
+        do {
+            try session.send(data, toPeers: targets, with: .reliable)
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
     }
 
     private func receive(_ message: [String: Any], from peer: MCPeerID) {
+        guard session.connectedPeers.contains(peer),
+              role == .host || activePeer == peer else { return }
         guard let type = message["type"] as? String else { return }
         switch (role, type) {
         case (.host, "hello"):
@@ -160,7 +176,10 @@ final class PeerControl: NSObject, ObservableObject {
             send(["type": "proof", "proof": Self.proof(token, text: "remote:\(nonce)")], to: peer)
         case (.remote, "state"):
             guard verifiedHost else { return }
-            guard let snapshot = message["state"] as? [String: Any] else { return }
+            guard let messageRevision = message["revision"] as? Int,
+                  messageRevision > receivedRevision,
+                  let snapshot = message["state"] as? [String: Any] else { return }
+            receivedRevision = messageRevision
             authorized = true; state = snapshot
         case (.remote, "error"):
             error = message["message"] as? String
@@ -179,9 +198,14 @@ extension PeerControl: MCSessionDelegate {
         DispatchQueue.main.async {
             switch state {
             case .connected:
+                guard session.connectedPeers.contains(peerID),
+                      self.role == .host || self.activePeer == peerID else { return }
                 self.connected = true
                 if self.role == .remote {
+                    self.authorized = false
+                    self.verifiedHost = false
                     self.remoteNonce = UUID().uuidString
+                    self.receivedRevision = 0
                     self.send(["type": "hello", "nonce": self.remoteNonce], to: peerID)
                 }
             case .notConnected:
@@ -189,7 +213,9 @@ extension PeerControl: MCSessionDelegate {
                 if self.role == .host && self.authorizedPeer == peerID {
                     self.authorized = false; self.authorizedPeer = nil; self.onDisconnect?()
                 }
-                if self.role == .remote && self.activePeer == peerID { self.authorized = false; self.verifiedHost = false }
+                if self.role == .remote && self.activePeer == peerID {
+                    self.authorized = false; self.verifiedHost = false; self.receivedRevision = 0
+                }
                 self.invited.remove(peerID.displayName)
             case .connecting: break
             @unknown default: break
