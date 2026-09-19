@@ -27,17 +27,12 @@ struct PreviewSendWindow {
     }
 }
 
-/// Socket capacity is adaptive, so pressure is an indicator, not an ACK or a
-/// measurement of glass-to-glass latency. Never label contentProcessed as delivery.
-struct TCPBacklogGuard {
-    var maximumQueuedBytes = 65_536
-    private var peakFreeBytes = 0
-    private var pressureSince: TimeInterval?
-    mutating func observe(freeBytes: Int, now: TimeInterval) -> Bool {
-        peakFreeBytes = max(peakFreeBytes, freeBytes)
-        if peakFreeBytes - freeBytes >= maximumQueuedBytes || freeBytes < 16_384 {
-            if pressureSince == nil { pressureSince = now }
-        } else { pressureSince = nil }
-        return pressureSince.map { now - $0 >= 0.35 } ?? false
+/// Restore the last-working blocked-send deadline, not a media playback buffer.
+/// A successful write clears its start time. Free TCP capacity is deliberately
+/// excluded: neither a small buffer nor a changing capacity proves a stall.
+enum RTSPSendDeadline {
+    static func isExpired(startedAt: TimeInterval?, now: TimeInterval) -> Bool {
+        guard let startedAt else { return false }
+        return now - startedAt >= 2
     }
 }

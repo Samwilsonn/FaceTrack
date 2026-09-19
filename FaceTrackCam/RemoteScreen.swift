@@ -162,14 +162,11 @@ struct RemoteScreen: View {
                         HStack { Text("Connect"); Spacer(); Image(systemName: "network") }.frame(minHeight: 32)
                     }.padding(8).liquidGlass(cornerRadius: 16)
                     if showConnection {
-                        VStack(alignment: .leading, spacing: 8) {
-                            LabeledContent("Host", value: peer.connectedHostName)
-                            LabeledContent("Status", value: peer.authorized ? "Connected" : "Pairing")
-                            LabeledContent("Viewers", value: String(peer.state["viewers"] as? Int ?? 0))
-                            ForEach(peer.discovered, id: \.displayName) { host in
-                                Button(host.displayName) { peer.connect(host) }.padding(8).liquidGlass(cornerRadius: 16)
-                            }
-                        }
+                        CameraConnectionDetails(viewers: peer.state["viewers"] as? Int ?? 0,
+                            wifiURL: connectionValue("wifiURL"), usbURL: connectionValue("usbURL"),
+                            remoteWifiURL: connectionValue("remoteWifiURL"), remoteUSBURL: connectionValue("remoteUSBURL"),
+                            remotePassword: connectionValue("remotePassword"), fps: peer.state["fps"] as? Int ?? 0,
+                            thermal: text("thermal"), streaming: peer.state["streaming"] as? Bool == true)
                     }
                     Toggle("Live Preview", isOn: Binding(get: { previewEnabled }, set: {
                         FaceTrackHaptics.tap(); previewEnabled = $0; requestPreview()
@@ -223,6 +220,10 @@ struct RemoteScreen: View {
     }
 
     private func text(_ key: String) -> String { peer.state[key] as? String ?? "" }
+    private func connectionValue(_ key: String) -> String {
+        guard peer.authorized else { return "" }
+        return (peer.state["connection"] as? [String: String])?[key] ?? ""
+    }
     private func items(_ key: String) -> [RemoteItem] {
         (peer.state[key] as? [[String: String]] ?? []).compactMap { (item: [String: String]) -> RemoteItem? in
             guard let id = item["id"], let name = item["name"] else { return nil }

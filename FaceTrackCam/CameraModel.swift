@@ -131,7 +131,7 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
         }
         remoteStateTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             guard let self, self.peer.authorized else { return }
-            self.peer.publish(self.remoteState())
+            self.peer.publish(self.remoteState(includeConnectionDetails: true))
         }
         observe(UIDevice.orientationDidChangeNotification, object: nil) { [weak self] _ in self?.updateOrientation() }
         observe(.AVCaptureSessionWasInterrupted, object: session) { [weak self] _ in

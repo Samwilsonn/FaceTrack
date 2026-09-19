@@ -393,16 +393,10 @@ struct CameraScreen: View {
     }
 
     private var connectionDetails: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            LabeledContent("Viewers", value: "\(camera.viewers)")
-            if let url = camera.wifiH264URL { compactURLRow("Wi‑Fi · H.264", url) }
-            compactURLRow("USB · H.264", camera.usbH264URL)
-            if let host = camera.wifiAddress { compactURLRow("Remote · Wi-Fi", "http://\(host):8080/remote") }
-            compactURLRow("Remote · USB", "http://127.0.0.1:18080/remote")
-            compactURLRow("Remote password", camera.remoteKey)
-            Text("\(camera.fps) fps · \(camera.thermal)").font(.caption)
-        }
-        .background(Color.clear)
+        CameraConnectionDetails(viewers: camera.viewers, wifiURL: camera.wifiH264URL ?? "",
+            usbURL: camera.usbH264URL, remoteWifiURL: camera.wifiAddress.map { "http://\($0):8080/remote" } ?? "",
+            remoteUSBURL: "http://127.0.0.1:18080/remote", remotePassword: camera.remoteKey,
+            fps: camera.fps, thermal: camera.thermal, streaming: camera.streaming)
     }
 
     private var presetsPanel: some View {
@@ -420,14 +414,6 @@ struct CameraScreen: View {
             }
             if camera.streaming { Text("Quality stays unchanged while live.").font(.caption) }
         }
-    }
-
-    private func compactURLRow(_ title: String, _ url: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) { Text(title).font(.caption).foregroundStyle(.secondary); Text(url).font(.caption2.monospaced()).lineLimit(2).textSelection(.enabled) }
-            Spacer()
-            Button { UIPasteboard.general.string = url } label: { Image(systemName: "doc.on.doc").frame(width: 34, height: 34) }.disabled(!camera.streaming)
-        }.padding(8).liquidGlass(cornerRadius: 16)
     }
 
     private var dimOverlay: some View {

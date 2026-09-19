@@ -18,14 +18,16 @@ final class LiveDeliveryPolicyTests: XCTestCase {
         XCTAssertFalse(window.expired(now: 0.2))
         XCTAssertTrue(window.expired(now: 0.3))
     }
-    func testSocketPressureMustPersist() {
-        var guardrail = TCPBacklogGuard()
-        XCTAssertFalse(guardrail.observe(freeBytes: 200000, now: 0))
-        XCTAssertFalse(guardrail.observe(freeBytes: 100000, now: 1))
-        XCTAssertFalse(guardrail.observe(freeBytes: 100000, now: 1.2))
-        XCTAssertTrue(guardrail.observe(freeBytes: 100000, now: 1.4))
-        XCTAssertFalse(guardrail.observe(freeBytes: 200000, now: 2))
-        XCTAssertFalse(guardrail.observe(freeBytes: 100000, now: 3))
+    func testStartupWriteIsNotKilledAtOld350msDeadline() {
+        XCTAssertFalse(RTSPSendDeadline.isExpired(startedAt: 10, now: 10.35))
+        XCTAssertFalse(RTSPSendDeadline.isExpired(startedAt: 10, now: 11.99))
+        XCTAssertTrue(RTSPSendDeadline.isExpired(startedAt: 10, now: 12))
+    }
+    func testCompletedWritesAndIndependentAudioVideoDeadlines() {
+        XCTAssertFalse(RTSPSendDeadline.isExpired(startedAt: nil, now: 100))
+        // Audio progress cannot hide a blocked video write (or vice versa).
+        XCTAssertTrue(RTSPSendDeadline.isExpired(startedAt: 10, now: 12.1))
+        XCTAssertFalse(RTSPSendDeadline.isExpired(startedAt: 12, now: 12.1))
     }
     func testPreviewOrientationMatchesHostPolicy() {
         XCTAssertTrue(PreviewGeometry.rotatesToPortrait(source: CGSize(width: 1920, height: 1080), viewport: CGSize(width: 390, height: 844)))

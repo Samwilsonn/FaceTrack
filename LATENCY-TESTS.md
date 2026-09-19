@@ -20,12 +20,19 @@ do not establish the cause of delay. Compare hardware decoding on/off separately
 
 Optional Xcode launch argument `--latency-trace` emits Instruments Points of Interest
 for Frame processing, Capture to encoder admission, Encoder output, Capture to RTP,
-TCP write processed, TCP pressure reset, Preview round trip, Preview arrival drift
+TCP write processed, Preview round trip, Preview arrival drift
 and Preview decode submission. Normally disabled. TCP completion is NOT an ACK
 or a display timestamp. These markers cannot measure OBS rendering directly.
 
 Policy deadlines (not measured latency): encoder admission 150 ms, RTP frame age
-200 ms, sustained TCP pressure/send 350 ms, preview acknowledgment 250 ms.
-TCP sessions are aborted on sustained staleness; OBS reconnect timing remains
+200 ms, genuinely blocked TCP send 2 seconds, preview acknowledgment 250 ms.
+Free socket capacity no longer terminates a session; it cannot establish backlog age.
+TCP sessions are aborted on blocked sends; OBS reconnect timing remains
 receiver-controlled. A brief frozen/blank frame during recovery is preferable to
 playing accumulated history but must be tested on the real network.
+
+Regression acceptance: no Remote/mic OFF; no Remote/mic ON; paired Remote/preview
+OFF; preview ON; preview OFF again; Remote disconnect; OBS disconnect/reconnect.
+Each must give continuous OBS video after connection, current SPS/PPS/IDR on
+reconnect, working audio when enabled, no repeated reconnect haptics and no replayed
+backlog. Compare Host and Remote Connect Wi-Fi/USB/password rows and copied values.

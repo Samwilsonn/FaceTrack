@@ -13,7 +13,6 @@ final class H264RTSPServer {
         var sending = false
         var videoSendStarted: Date?
         var audioSendStarted: Date?
-        var socketPressure = TCPBacklogGuard()
         var lastClockReport = Date.distantPast
         var sequence = UInt16.random(in: 0...UInt16.max)
         var audioSequence = UInt16.random(in: 0...UInt16.max)
@@ -57,7 +56,6 @@ final class H264RTSPServer {
     private var timer: DispatchSourceTimer?
     private var token = ""
     private var running = false
-    private var socketByteBudget = 65_536
     private var microphoneEnabled = false
     private var audioCaptureRunning = false
     private let ssrc = UInt32.random(in: 1...UInt32.max)
@@ -150,16 +148,12 @@ final class H264RTSPServer {
         queue.async {
             self.stopInternal()
             self.token = token
-            let bitrate = max(1_000_000, min(12_000_000, Int(size.width * size.height * frameRate * 0.12)))
-            self.socketByteBudget = max(65_536, bitrate / 8 / 5) // about 200 ms at the unchanged target rate
             self.encoder.start(size: size, frameRate: frameRate)
             do {
                 let tcp = NWProtocolTCP.Options()
                 tcp.noDelay = true
-                // Do not retransmit an obsolete live timeline for tens of seconds.
-                // Already-written TCP bytes cannot be removed individually.
-                tcp.connectionDropTime = 1
-                tcp.persistTimeout = 1
+                // Use normal TCP startup/retransmission behavior. The bounded
+                // media-send watchdog below aborts genuinely blocked sessions.
                 let listener = try NWListener(using: NWParameters(tls: nil, tcp: tcp), on: 8554)
                 self.listener = listener
                 listener.stateUpdateHandler = { [weak self, weak listener] state in
@@ -221,7 +215,6 @@ final class H264RTSPServer {
     private func accept(_ connection: NWConnection) {
         guard running, clients.count < 8 else { connection.cancel(); return }
         let id = UUID(), client = Client(connection)
-        client.socketPressure.maximumQueuedBytes = socketByteBudget
         clients[id] = client
         connection.stateUpdateHandler = { [weak self] state in
             if case .failed = state { self?.remove(id) }
@@ -317,6 +310,7 @@ final class H264RTSPServer {
             if client.audioChannel != nil { info.append("url=\(client.audioControl);seq=\(client.audioSequence);rtptime=\(LiveStreamClock.ticks(hostTime, rate: 48_000))") }
             reply(id, cseq: cseq, extra: "Session: \(client.sessionID)\r\nRange: npt=0.000-\r\nRTP-Info: \(info.joined(separator: ","))\r\n")
             client.playing = true; client.awaitingKeyframe = true
+            client.lastProgress = Date()
             sendClockReport(id, client: client)
             reportViewers()
             updateAudioCapture()
@@ -373,7 +367,8 @@ final class H264RTSPServer {
                 else {
                     let elapsed = client.videoSendStarted.map { Date().timeIntervalSince($0) } ?? 0
                     StreamDiagnostics.sample("TCP write processed", milliseconds: elapsed * 1000)
-                    if elapsed >= 0.35 { self.remove(id); return }
+                    if RTSPSendDeadline.isExpired(startedAt: client.videoSendStarted?.timeIntervalSinceReferenceDate,
+                                                   now: Date().timeIntervalSinceReferenceDate) { self.remove(id); return }
                     client.sending = false; client.videoSendStarted = nil; client.lastProgress = Date()
                     if client.awaitingKeyframe { self.encoder.requestKeyframe() }
                 }
@@ -415,7 +410,8 @@ final class H264RTSPServer {
                 guard let self, let client, self.clients[id] === client else { return }
                 if error != nil { self.remove(id) }
                 else {
-                    if client.audioSendStarted.map({ Date().timeIntervalSince($0) >= 0.35 }) == true {
+                    if RTSPSendDeadline.isExpired(startedAt: client.audioSendStarted?.timeIntervalSinceReferenceDate,
+                                                   now: Date().timeIntervalSinceReferenceDate) {
                         self.remove(id); return
                     }
                     client.audioSending = false; client.audioSendStarted = nil
@@ -446,15 +442,13 @@ final class H264RTSPServer {
         let now = Date()
         let expired = clients.filter { entry in
             let client = entry.value
-            if client.playing,
-               let tcp = client.connection.metadata(definition: NWProtocolTCP.definition) as? NWProtocolTCP.Metadata,
-               client.socketPressure.observe(freeBytes: Int(tcp.availableSendBuffer), now: ProcessInfo.processInfo.systemUptime) {
-                StreamDiagnostics.sample("TCP pressure reset", milliseconds: 350)
-                return true
-            }
+            // Available TCP buffer space is not queued-byte age or evidence of
+            // a stall. It can stay small on a healthy, actively draining socket.
             return now.timeIntervalSince(client.lastProgress) > 6 ||
-                (client.videoSendStarted.map { now.timeIntervalSince($0) >= 0.35 } ?? false) ||
-                (client.audioSendStarted.map { now.timeIntervalSince($0) >= 0.35 } ?? false)
+                RTSPSendDeadline.isExpired(startedAt: client.videoSendStarted?.timeIntervalSinceReferenceDate,
+                                           now: now.timeIntervalSinceReferenceDate) ||
+                RTSPSendDeadline.isExpired(startedAt: client.audioSendStarted?.timeIntervalSinceReferenceDate,
+                                           now: now.timeIntervalSinceReferenceDate)
         }.map(\.key)
         expired.forEach(remove)
         for (id, client) in clients where client.playing && !client.sending && !client.audioSending && now.timeIntervalSince(client.lastClockReport) >= 1 {

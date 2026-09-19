@@ -1,7 +1,7 @@
 import Foundation
 
 extension CameraModel {
-    func remoteState() -> [String: Any] {
+    func remoteState(includeConnectionDetails: Bool = false) -> [String: Any] {
         let visible = visibleBackgrounds
         let ids = Set(backgrounds.map(\.id))
         remoteThumbnailCache = remoteThumbnailCache.filter { ids.contains($0.key) }
@@ -11,6 +11,11 @@ extension CameraModel {
         return ["streaming": streaming, "fps": fps, "thermal": thermal, "viewers": viewers,
          "livePreview": remotePreviewEnabled, "previewName": remotePreviewName,
          "previewToken": peer.authorized ? remotePreviewToken : "",
+         "connection": includeConnectionDetails && peer.authorized ? [
+            "wifiURL": wifiH264URL ?? "", "usbURL": usbH264URL,
+            "remoteWifiURL": wifiAddress.map { "http://\($0):8080/remote" } ?? "",
+            "remoteUSBURL": "http://127.0.0.1:18080/remote", "remotePassword": remoteKey
+         ] : [String: String](),
          "lens": selectedCamera, "quality": settings.quality.rawValue, "tracking": settings.tracking,
          "intensity": Double(settings.intensity), "subject": settings.subjectMode.rawValue,
          "exposure": exposure, "exposureLocked": exposureLocked, "temperature": whiteBalanceTemperature,
