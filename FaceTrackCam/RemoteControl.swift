@@ -11,6 +11,8 @@ extension CameraModel {
         return ["streaming": streaming, "fps": fps, "thermal": thermal, "viewers": viewers,
          "livePreview": remotePreviewEnabled, "previewName": remotePreviewName,
          "microphone": microphoneEnabled,
+         "voiceProcessing": voiceProcessingEnabled,
+         "automaticGainControl": automaticGainControlEnabled,
          "previewToken": peer.authorized ? remotePreviewToken : "",
          "connection": includeConnectionDetails && peer.authorized ? [
             "wifiURL": wifiH264URL ?? "", "usbURL": usbH264URL,
@@ -63,6 +65,15 @@ extension CameraModel {
         case "microphone":
             guard let flag = command["value"] as? Bool else { return "Expected on/off" }
             setMicrophoneEnabled(flag)
+        case "voiceProcessing":
+            guard let flag = command["value"] as? Bool else { return "Expected on/off" }
+            guard !microphoneEnabled else { return "Turn off the microphone first" }
+            setVoiceProcessingEnabled(flag)
+        case "automaticGainControl":
+            guard let flag = command["value"] as? Bool else { return "Expected on/off" }
+            guard voiceProcessingEnabled else { return "Enable Voice Cleanup first" }
+            guard !microphoneEnabled else { return "Turn off the microphone first" }
+            setAutomaticGainControlEnabled(flag)
         case "intensity", "exposure", "temperature":
             guard let number = Float(value), number.isFinite else { return "Invalid adjustment" }
             switch action {

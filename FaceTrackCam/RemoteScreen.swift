@@ -178,6 +178,12 @@ struct RemoteScreen: View {
                         set: { FaceTrackHaptics.tap(); peer.command("mirror", value: $0) })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
                     Toggle("Microphone", isOn: Binding(get: { peer.state["microphone"] as? Bool ?? false },
                         set: { FaceTrackHaptics.tap(); peer.command("microphone", value: $0) })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
+                    Toggle("Apple Voice Cleanup", isOn: Binding(get: { peer.state["voiceProcessing"] as? Bool ?? false },
+                        set: { FaceTrackHaptics.tap(); peer.command("voiceProcessing", value: $0) })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
+                        .disabled(peer.state["microphone"] as? Bool == true)
+                    Toggle("Auto Level", isOn: Binding(get: { peer.state["automaticGainControl"] as? Bool ?? false },
+                        set: { FaceTrackHaptics.tap(); peer.command("automaticGainControl", value: $0) })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
+                        .disabled(peer.state["microphone"] as? Bool == true || peer.state["voiceProcessing"] as? Bool != true)
                     ForEach(items("presets"), id: \.id) { item in
                         Button { peer.command("preset", value: item.id) } label: { row(item.name, value: "Apply", icon: "slider.horizontal.3") }
                     }

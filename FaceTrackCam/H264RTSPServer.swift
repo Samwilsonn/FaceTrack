@@ -143,6 +143,13 @@ final class H264RTSPServer {
         }
     }
 
+    func setAudioProcessing(voiceProcessingEnabled: Bool, automaticGainControlEnabled: Bool) {
+        queue.async {
+            self.microphone.setAudioProcessing(voiceProcessingEnabled: voiceProcessingEnabled,
+                                               automaticGainControlEnabled: automaticGainControlEnabled)
+        }
+    }
+
     private func updatePreview() {
         if running && previewWanted { remotePreview.start(token: previewToken) }
         else { remotePreview.stop() }

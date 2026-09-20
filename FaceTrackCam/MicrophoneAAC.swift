@@ -31,6 +31,8 @@ final class MicrophoneAAC {
     private var silenceTimer: DispatchSourceTimer?
     private var lastEmittedTimestamp: UInt32?
     private var compressedBuffer: AVAudioCompressedBuffer?
+    private var voiceProcessingEnabled = false
+    private var automaticGainControlEnabled = false
 
     func start(microphoneEnabled: Bool) {
         queue.async {
@@ -52,6 +54,16 @@ final class MicrophoneAAC {
         queue.async { self.changeMicrophone(enabled) }
     }
 
+    /// Apple voice processing must be configured while the audio engine is
+    /// stopped. CameraModel changes these options while the microphone is off,
+    /// so the next capture starts with the requested processing mode.
+    func setAudioProcessing(voiceProcessingEnabled: Bool, automaticGainControlEnabled: Bool) {
+        queue.async {
+            self.voiceProcessingEnabled = voiceProcessingEnabled
+            self.automaticGainControlEnabled = automaticGainControlEnabled && voiceProcessingEnabled
+        }
+    }
+
     private func changeMicrophone(_ enabled: Bool) {
         guard running else { return }
         self.enabled = enabled
@@ -69,6 +81,10 @@ final class MicrophoneAAC {
             do {
                 let engine = AVAudioEngine()
                 let input = engine.inputNode
+                if voiceProcessingEnabled {
+                    try input.setVoiceProcessingEnabled(true)
+                    input.isVoiceProcessingAGCEnabled = automaticGainControlEnabled
+                }
                 let inputFormat = input.outputFormat(forBus: 0)
                 guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,
                       inputFormat.commonFormat == .pcmFormatFloat32, !inputFormat.isInterleaved,
@@ -256,5 +272,4 @@ final class MicrophoneAAC {
         return nil
     }
 }
-
 

@@ -30,6 +30,8 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
     let remoteKey = CameraLibrary.stableSecret("remoteKey")
     @Published var connectionAlerts = true
     @Published private(set) var microphoneEnabled = false
+    @Published private(set) var voiceProcessingEnabled = false
+    @Published private(set) var automaticGainControlEnabled = false
     private var microphoneRequest = 0
     @Published private(set) var backgrounds: [BackgroundAsset] = CameraLibrary.load("backgrounds.json", fallback: [])
     @Published private(set) var recentBackgroundIDs: [UUID] = CameraLibrary.load("recents.json", fallback: [])
@@ -224,14 +226,45 @@ final class CameraModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
         }
     }
 
+    func setVoiceProcessingEnabled(_ enabled: Bool) {
+        guard !microphoneEnabled else {
+            report("Turn off the microphone before changing Voice Cleanup.")
+            return
+        }
+        voiceProcessingEnabled = enabled
+        if !enabled { automaticGainControlEnabled = false }
+        rtsp.setAudioProcessing(voiceProcessingEnabled: voiceProcessingEnabled,
+                                automaticGainControlEnabled: automaticGainControlEnabled)
+    }
+
+    func setAutomaticGainControlEnabled(_ enabled: Bool) {
+        guard voiceProcessingEnabled else {
+            automaticGainControlEnabled = false
+            return
+        }
+        guard !microphoneEnabled else {
+            report("Turn off the microphone before changing Auto Level.")
+            return
+        }
+        automaticGainControlEnabled = enabled
+        rtsp.setAudioProcessing(voiceProcessingEnabled: voiceProcessingEnabled,
+                                automaticGainControlEnabled: automaticGainControlEnabled)
+    }
+
     private func enableMicrophoneSession() {
         do {
             let audio = AVAudioSession.sharedInstance()
-            try audio.setCategory(.record, mode: .videoRecording, options: [.allowBluetooth, .mixWithOthers])
+            if voiceProcessingEnabled {
+                try audio.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .mixWithOthers])
+            } else {
+                try audio.setCategory(.record, mode: .videoRecording, options: [.allowBluetooth, .mixWithOthers])
+            }
             try audio.setPreferredSampleRate(48_000)
             try audio.setPreferredIOBufferDuration(0.005)
             try audio.setActive(true)
             microphoneEnabled = true
+            rtsp.setAudioProcessing(voiceProcessingEnabled: voiceProcessingEnabled,
+                                    automaticGainControlEnabled: automaticGainControlEnabled)
             rtsp.setMicrophoneEnabled(true)
         } catch {
             microphoneEnabled = false

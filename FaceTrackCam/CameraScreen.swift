@@ -362,6 +362,12 @@ struct CameraScreen: View {
                     .onChange(of: camera.connectionAlerts) { _, _ in FaceTrackHaptics.tap() }
                 Toggle("Microphone", isOn: Binding(get: { camera.microphoneEnabled }, set: { camera.setMicrophoneEnabled($0) }))
                     .tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
+                Toggle("Apple Voice Cleanup", isOn: Binding(get: { camera.voiceProcessingEnabled }, set: { camera.setVoiceProcessingEnabled($0) }))
+                    .tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
+                    .disabled(camera.microphoneEnabled)
+                Toggle("Auto Level", isOn: Binding(get: { camera.automaticGainControlEnabled }, set: { camera.setAutomaticGainControlEnabled($0) }))
+                    .tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
+                    .disabled(camera.microphoneEnabled || !camera.voiceProcessingEnabled)
                 LabeledContent("Remote pairing", value: camera.peer.pairingCode)
                     .padding(12).liquidGlass(cornerRadius: 16)
                 Button { camera.stopStream(); appMode = "remote" } label: {

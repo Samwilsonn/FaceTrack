@@ -32,8 +32,11 @@ stream restarts but changes if FacePull's app data is removed. Streaming include
 H.264 video and AAC-LC 48 kHz mono audio. The microphone is off by default; while
 off, a silent AAC track keeps OBS's negotiated format stable. Reconnect OBS after
 upgrading to renegotiate the stream. Use the Microphone toggle in Host Settings or
-Remote controls to enable live microphone capture. The archived source remains in
-`ArchivedAudio/` for reference.
+Remote controls to enable live microphone capture. Optional Apple Voice Cleanup
+enables iOS voice processing for noise suppression and echo reduction; Auto Level
+enables Apple's automatic microphone gain control. Both settings are off by
+default and can only be changed while the microphone is off. The archived source
+remains in `ArchivedAudio/` for reference.
 For timing measurements and Wi-Fi recovery checks, see [LATENCY-TESTS.md](LATENCY-TESTS.md).
 
 ## OBS over USB on Windows
