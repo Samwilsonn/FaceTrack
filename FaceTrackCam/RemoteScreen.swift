@@ -176,6 +176,8 @@ struct RemoteScreen: View {
                         set: { FaceTrackHaptics.tap(); peer.command("mirrorPreview", value: $0) })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
                     Toggle("Mirror stream", isOn: Binding(get: { peer.state["mirror"] as? Bool ?? false },
                         set: { FaceTrackHaptics.tap(); peer.command("mirror", value: $0) })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
+                    Toggle("Microphone", isOn: Binding(get: { peer.state["microphone"] as? Bool ?? false },
+                        set: { FaceTrackHaptics.tap(); peer.command("microphone", value: $0) })).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
                     ForEach(items("presets"), id: \.id) { item in
                         Button { peer.command("preset", value: item.id) } label: { row(item.name, value: "Apply", icon: "slider.horizontal.3") }
                     }

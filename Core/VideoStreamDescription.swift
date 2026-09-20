@@ -3,7 +3,7 @@ import Foundation
 /// The active stream advertises and accepts exactly one H.264 video track.
 enum VideoStreamDescription {
     static func accepts(path: String) -> Bool {
-        ["/facepull", "/facepull/trackID=0"].contains(path)
+        ["/facepull", "/facepull/trackID=0", "/facepull/trackID=1"].contains(path)
     }
 
     struct Format: Equatable {

@@ -10,6 +10,7 @@ extension CameraModel {
         }
         return ["streaming": streaming, "fps": fps, "thermal": thermal, "viewers": viewers,
          "livePreview": remotePreviewEnabled, "previewName": remotePreviewName,
+         "microphone": microphoneEnabled,
          "previewToken": peer.authorized ? remotePreviewToken : "",
          "connection": includeConnectionDetails && peer.authorized ? [
             "wifiURL": wifiH264URL ?? "", "usbURL": usbH264URL,
@@ -59,6 +60,9 @@ extension CameraModel {
             case "whiteBalanceLocked": whiteBalanceLocked = flag
             default: settings.mirrorStream = flag
             }
+        case "microphone":
+            guard let flag = command["value"] as? Bool else { return "Expected on/off" }
+            setMicrophoneEnabled(flag)
         case "intensity", "exposure", "temperature":
             guard let number = Float(value), number.isFinite else { return "Invalid adjustment" }
             switch action {

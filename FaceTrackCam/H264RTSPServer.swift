@@ -18,6 +18,14 @@ final class H264RTSPServer {
         var videoControl = ""
         var videoPackets: UInt32 = 0
         var videoOctets: UInt32 = 0
+        var audioSending = false
+        var audioSendStarted: TimeInterval?
+        var audioSequence = UInt16.random(in: 0...UInt16.max)
+        var audioChannel: UInt8?
+        var audioControl = ""
+        var audioPackets: UInt32 = 0
+        var audioOctets: UInt32 = 0
+        var pendingAudio: [MicrophoneAAC.Frame] = []
         var lastProgress = ProcessInfo.processInfo.systemUptime
         let sessionID = UUID().uuidString
         init(_ connection: NWConnection) { self.connection = connection }
@@ -26,8 +34,10 @@ final class H264RTSPServer {
     var onError: ((String) -> Void)?
     var onStatus: ((Bool, String?) -> Void)?
     var onViewers: ((Int) -> Void)?
+    var onMicrophoneFailure: (() -> Void)?
     private let queue = DispatchQueue(label: "facepull.rtsp", qos: .userInitiated)
     private let encoder = H264Encoder()
+    private let microphone = MicrophoneAAC()
     private let remotePreview = RemotePreviewChannel(host: true)
     private var previewWanted = false
     private var previewToken = ""
@@ -37,6 +47,11 @@ final class H264RTSPServer {
     private var deliveryPending = false
     private var deliveryDropped = false
     private var hasViewers = false
+    private var microphoneEnabled = false
+    private var audioAllowed = false
+    private var audioCaptureRunning = false
+    private var audioDeliveryQueued = false
+    private var audioFrames: [MicrophoneAAC.Frame] = []
     private var needsFormat = false
     private var encoderReady = false
     private var generation = 0
@@ -49,6 +64,7 @@ final class H264RTSPServer {
     private var token = ""
     private var running = false
     private let ssrc = UInt32.random(in: 1...UInt32.max)
+    private let audioSSRC = UInt32.random(in: 1...UInt32.max)
 
     init() {
         remotePreview.onDemand = { [weak self] enabled in
@@ -95,12 +111,35 @@ final class H264RTSPServer {
             }
         }
         encoder.onError = { [weak self] message in self?.report(message) }
+        microphone.onFrame = { [weak self] frame in
+            guard let self else { return }
+            self.deliveryGate.lock()
+            guard self.audioAllowed else { self.deliveryGate.unlock(); return }
+            if self.audioFrames.count >= 8 { self.audioFrames.removeFirst() }
+            self.audioFrames.append(frame)
+            guard !self.audioDeliveryQueued else { self.deliveryGate.unlock(); return }
+            self.audioDeliveryQueued = true
+            self.deliveryGate.unlock()
+            self.queue.async { self.sendAudioFrames() }
+        }
+        microphone.onError = { [weak self] message in
+            self?.report(message)
+            DispatchQueue.main.async { self?.onMicrophoneFailure?() }
+        }
     }
 
     func setPreviewEnabled(_ enabled: Bool, token: String) {
         queue.async {
             self.previewWanted = enabled; self.previewToken = token
             self.updatePreview()
+        }
+    }
+
+    func setMicrophoneEnabled(_ enabled: Bool) {
+        queue.async {
+            self.microphoneEnabled = enabled
+            self.microphone.setMicrophoneEnabled(enabled)
+            if !enabled { self.audioFrames.removeAll() }
         }
     }
 
@@ -144,6 +183,7 @@ final class H264RTSPServer {
                         // session's headers before OBS asks for its description.
                         self.deliveryGate.lock(); self.needsFormat = self.videoFormat == nil; self.deliveryGate.unlock()
                         self.updatePreview()
+                        self.updateAudioCapture()
                         if self.encoderReady { self.reportStatus(true) }
                     case .failed(let error):
                         self.stopInternal()
@@ -186,6 +226,9 @@ final class H264RTSPServer {
         encoderReady = false
         needsFormat = false
         deliveryPending = false; deliveryDropped = false
+        audioFrames.removeAll()
+        audioDeliveryQueued = false
+        audioAllowed = false
         latestVideoTimestamp = nil
         deliveryGate.unlock()
         videoFormat = nil
@@ -197,6 +240,8 @@ final class H264RTSPServer {
         clients.removeAll()
         reportViewers()
         encoder.stop()
+        microphone.stop()
+        audioCaptureRunning = false
         if hadListener { reportStatus(false) }
     }
 
@@ -268,32 +313,39 @@ final class H264RTSPServer {
                 reply(id, cseq: cseq, status: "400 Bad Request"); return
             }
             client.videoControl = videoControl
-            let sdp = VideoStreamDescription.sdp(control: videoControl, frameRate: frameRate, format: videoFormat)
+            var sdp = VideoStreamDescription.sdp(control: videoControl, frameRate: frameRate, format: videoFormat)
+            let audioControl = uri.replacingOccurrences(of: "/facepull?", with: "/facepull/trackID=1?")
+            client.audioControl = audioControl
+            sdp += "m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/48000/1\r\na=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;config=1188;constantDuration=1024;SizeLength=13;IndexLength=3;IndexDeltaLength=3\r\na=control:\(audioControl)\r\n"
             reply(id, cseq: cseq, extra: "Content-Base: \(uri)\r\nContent-Type: application/sdp\r\n", body: sdp)
         case "SETUP":
             let transport = lines.first(where: { $0.lowercased().hasPrefix("transport:") })?.lowercased() ?? ""
             guard transport.contains("rtp/avp/tcp") && transport.contains("interleaved=") else {
                 reply(id, cseq: cseq, status: "461 Unsupported Transport"); return
             }
-            guard url.path == "/facepull/trackID=0",
+            let isAudio = url.path == "/facepull/trackID=1"
+            guard url.path == "/facepull/trackID=0" || isAudio,
                   let channelText = transport.components(separatedBy: "interleaved=").dropFirst().first?.split(separator: ";").first,
                   let first = UInt8(channelText.split(separator: "-").first ?? ""), first <= 252,
                   channelText == "\(first)-\(first + 1)", first.isMultiple(of: 2) else {
                 reply(id, cseq: cseq, status: "461 Unsupported Transport"); return
             }
-            client.videoChannel = first
-            reply(id, cseq: cseq, extra: "Transport: RTP/AVP/TCP;unicast;interleaved=\(first)-\(first + 1);ssrc=\(String(ssrc, radix: 16))\r\nSession: \(client.sessionID);timeout=60\r\n")
+            if isAudio { client.audioChannel = first } else { client.videoChannel = first }
+            let trackSSRC = isAudio ? audioSSRC : ssrc
+            reply(id, cseq: cseq, extra: "Transport: RTP/AVP/TCP;unicast;interleaved=\(first)-\(first + 1);ssrc=\(String(trackSSRC, radix: 16))\r\nSession: \(client.sessionID);timeout=60\r\n")
         case "PLAY":
-            guard client.videoChannel != nil else { reply(id, cseq: cseq, status: "455 Method Not Valid in This State"); return }
+            guard client.videoChannel != nil || client.audioChannel != nil else { reply(id, cseq: cseq, status: "455 Method Not Valid in This State"); return }
             let hostTime = CMClockGetTime(CMClockGetHostTimeClock()).seconds
             var info: [String] = []
             if client.videoChannel != nil { info.append("url=\(client.videoControl);seq=\(client.sequence);rtptime=\(LiveStreamClock.ticks(hostTime, rate: 90_000))") }
+            if client.audioChannel != nil { info.append("url=\(client.audioControl);seq=\(client.audioSequence);rtptime=\(LiveStreamClock.ticks(hostTime, rate: 48_000))") }
             reply(id, cseq: cseq, extra: "Session: \(client.sessionID)\r\nRange: npt=0.000-\r\nRTP-Info: \(info.joined(separator: ","))\r\n")
             client.playing = true; client.awaitingKeyframe = true
             client.lastProgress = ProcessInfo.processInfo.systemUptime
             sendClockReport(id, client: client)
             reportViewers()
             encoder.requestKeyframe()
+            updateAudioCapture()
         case "GET_PARAMETER": reply(id, cseq: cseq, extra: "Session: \(client.sessionID)\r\n")
         case "TEARDOWN":
             reply(id, cseq: cseq, extra: "Session: \(client.sessionID)\r\n")
@@ -356,6 +408,48 @@ final class H264RTSPServer {
         }
     }
 
+    private func updateAudioCapture() {
+        let needed = running && clients.values.contains { $0.playing && $0.audioChannel != nil }
+        deliveryGate.lock(); audioAllowed = needed; deliveryGate.unlock()
+        guard needed != audioCaptureRunning else { return }
+        audioCaptureRunning = needed
+        if needed { microphone.start(microphoneEnabled: microphoneEnabled) }
+        else { microphone.stop() }
+    }
+
+    private func sendAudioFrames() {
+        deliveryGate.lock()
+        let frames = audioFrames
+        audioFrames.removeAll(keepingCapacity: true)
+        audioDeliveryQueued = false
+        deliveryGate.unlock()
+        guard !frames.isEmpty, running else { return }
+        for (id, client) in clients where client.playing && client.audioChannel != nil {
+            guard !client.audioSending, let channel = client.audioChannel else { continue }
+            let available = frames.filter { microphoneEnabled || $0.silent }
+            guard let frame = available.last else { continue }
+            let packet = RTPAAC.packetize(frame.data, sequence: &client.audioSequence,
+                                          timestamp: frame.timestamp, ssrc: audioSSRC, channel: channel)
+            client.audioPackets &+= 1
+            client.audioOctets &+= UInt32(frame.data.count + 4)
+            client.audioSending = true
+            client.audioSendStarted = ProcessInfo.processInfo.systemUptime
+            client.connection.send(content: packet, completion: .contentProcessed { [weak self, weak client] error in
+                guard let self, let client, self.clients[id] === client else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                if error != nil || RTSPSendDeadline.isExpired(startedAt: client.audioSendStarted, now: now) {
+                    self.remove(id); return
+                }
+                client.audioSending = false; client.audioSendStarted = nil; client.lastProgress = now
+                self.deliveryGate.lock()
+                let moreAudio = self.audioAllowed && !self.audioFrames.isEmpty && !self.audioDeliveryQueued
+                if moreAudio { self.audioDeliveryQueued = true }
+                self.deliveryGate.unlock()
+                if moreAudio { self.queue.async { self.sendAudioFrames() } }
+            })
+        }
+    }
+
     private func remove(_ id: UUID) {
         guard let client = clients.removeValue(forKey: id) else { return }
         client.connection.stateUpdateHandler = nil
@@ -389,6 +483,11 @@ final class H264RTSPServer {
                 timestamp: LiveStreamClock.ticks(host, rate: 90_000), unixTime: wall,
                 packets: client.videoPackets, octets: client.videoOctets))
         }
+        if let channel = client.audioChannel {
+            report.append(LiveStreamClock.report(channel: channel + 1, ssrc: audioSSRC,
+                timestamp: LiveStreamClock.ticks(host, rate: 48_000), unixTime: wall,
+                packets: client.audioPackets, octets: client.audioOctets))
+        }
         client.connection.send(content: report, completion: .contentProcessed { [weak self] error in
             if error != nil { self?.remove(id) }
         })
@@ -397,6 +496,7 @@ final class H264RTSPServer {
     private func reportViewers() {
         let count = clients.values.filter { $0.playing && $0.videoChannel != nil }.count
         deliveryGate.lock(); hasViewers = count > 0; deliveryGate.unlock()
+        updateAudioCapture()
         DispatchQueue.main.async { [weak self] in self?.onViewers?(count) }
     }
 

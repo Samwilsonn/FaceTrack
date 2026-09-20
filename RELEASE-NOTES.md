@@ -3,6 +3,7 @@
 Prepared from `502e3a0` on `codex/mijick-obs-streaming`. This is a code and test
 candidate, not a verified final IPA. The reported one-second OBS delay has not yet
 been measured after these changes, and its full root cause remains unconfirmed.
+The AAC microphone pipeline has been restored in this pass.
 
 ## Changes
 
@@ -54,6 +55,13 @@ been measured after these changes, and its full root cause remains unconfirmed.
     generated Python caches and Xcode result bundles. (`project.yml`, `.gitignore`,
     `README.md`, `USB/SETUP.md`, `DEVICE-TESTS.md`, `LATENCY-AUDIT.md`,
     `LATENCY-TESTS.md`, this file)
+13. **Audio restored:** restored AAC-LC 48 kHz mono microphone capture, silent AAC
+    fallback while muted, RTSP audio SDP/RTP track negotiation, microphone
+    permission handling, Host and Remote toggles, and audio startup/recovery.
+    (`FaceTrackCam/MicrophoneAAC.swift`, `FaceTrackCam/RTPAAC.swift`,
+    `FaceTrackCam/H264RTSPServer.swift`, `FaceTrackCam/CameraModel.swift`,
+    `FaceTrackCam/CameraScreen.swift`, `FaceTrackCam/RemoteScreen.swift`,
+    `FaceTrackCam/RemoteControl.swift`, `project.yml`)
 
 ## Validation
 

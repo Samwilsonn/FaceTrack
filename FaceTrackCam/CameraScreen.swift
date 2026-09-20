@@ -360,6 +360,8 @@ struct CameraScreen: View {
                     .onChange(of: camera.settings.mirrorStream) { _, _ in FaceTrackHaptics.tap() }
                 Toggle("Connection haptics", isOn: $camera.connectionAlerts).tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
                     .onChange(of: camera.connectionAlerts) { _, _ in FaceTrackHaptics.tap() }
+                Toggle("Microphone", isOn: Binding(get: { camera.microphoneEnabled }, set: { camera.setMicrophoneEnabled($0) }))
+                    .tint(.blue).padding(8).liquidGlass(cornerRadius: 16)
                 LabeledContent("Remote pairing", value: camera.peer.pairingCode)
                     .padding(12).liquidGlass(cornerRadius: 16)
                 Button { camera.stopStream(); appMode = "remote" } label: {
