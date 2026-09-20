@@ -17,7 +17,7 @@ final class MicrophoneAAC {
     private let queue = DispatchQueue(label: "facepull.aac", qos: .userInitiated)
     private let admission = NSLock()
     private var pending = 0
-    private var inputGap = false
+    private var inputFailed = false
     private var generation = 0
     private var engine: AVAudioEngine?
     private var converter: AVAudioConverter?
@@ -142,7 +142,7 @@ final class MicrophoneAAC {
         admission.lock()
         generation &+= 1
         pending = 0
-        inputGap = false
+        inputFailed = false
         admission.unlock()
         if let engine {
             engine.inputNode.removeTap(onBus: 0)
@@ -156,12 +156,10 @@ final class MicrophoneAAC {
 
     private func accept(_ buffer: AVAudioPCMBuffer, time: AVAudioTime, generation: Int) {
         admission.lock()
-        guard self.generation == generation else { admission.unlock(); return }
+        guard self.generation == generation, !inputFailed else { admission.unlock(); return }
         guard pending < maxPendingBuffers else {
-            // Never let a slow AAC encode create an unbounded queue. The next
-            // encoded frame will insert cached silence for this discontinuity.
-            inputGap = true
             admission.unlock()
+            failInput(generation: generation, message: "Microphone capture fell behind and was muted. Turn the microphone on to retry.")
             return
         }
         pending += 1
@@ -169,6 +167,7 @@ final class MicrophoneAAC {
         guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength),
               let source = buffer.floatChannelData, let destination = copy.floatChannelData else {
             release(generation: generation)
+            failInput(generation: generation, message: "Microphone buffer allocation failed and capture was muted. Turn the microphone on to retry.")
             return
         }
         copy.frameLength = buffer.frameLength
@@ -190,12 +189,25 @@ final class MicrophoneAAC {
         admission.unlock()
     }
 
+    // Never splice separately encoded AAC silence into the middle of a live
+    // encoder stream. Stop once on actual input loss; already queued pre-gap
+    // PCM drains in order, then the existing muted track takes over.
+    private func failInput(generation: Int, message: String) {
+        admission.lock()
+        guard self.generation == generation, !inputFailed else { admission.unlock(); return }
+        inputFailed = true
+        admission.unlock()
+        queue.async {
+            guard self.generation == generation, self.running, self.enabled else { return }
+            self.enabled = false
+            self.stopCapture()
+            self.awaitingLive = false
+            self.onError?(message)
+        }
+    }
+
     private func encode(_ pcm: AVAudioPCMBuffer, timestamp: UInt32, generation: Int) {
         guard running, enabled, self.generation == generation, let converter, let compressed = compressedBuffer else { return }
-        admission.lock()
-        let hadInputGap = inputGap
-        inputGap = false
-        admission.unlock()
         var supplied = false
         // A resampler can produce more than one AAC access unit from one tap.
         // Drain it so the converter cannot accumulate old microphone samples.
@@ -224,14 +236,6 @@ final class MicrophoneAAC {
             if !hasTimestamp || Int32(bitPattern: timestamp &- nextTimestamp) > 12_000 {
                 nextTimestamp = timestamp
                 hasTimestamp = true
-            }
-            if hadInputGap, let silence, framesPerPacket > 0 {
-                var missing = Int64(Int32(bitPattern: timestamp &- nextTimestamp)) / Int64(framesPerPacket)
-                while missing > 0 && missing < 48 {
-                    emit(silence, timestamp: nextTimestamp, silent: true)
-                    nextTimestamp &+= framesPerPacket
-                    missing -= 1
-                }
             }
             let data = Data(bytes: compressed.data.advanced(by: offset), count: size)
             awaitingLive = false

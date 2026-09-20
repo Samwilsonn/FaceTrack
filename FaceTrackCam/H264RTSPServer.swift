@@ -117,8 +117,8 @@ final class H264RTSPServer {
             self.deliveryGate.lock()
             guard self.audioAllowed else { self.deliveryGate.unlock(); return }
             if self.audioFrames.count >= 32 {
-                // Audio must remain contiguous. A stale client is safer to
-                // reconnect than to feed OBS a sequence with missing AAC AUs.
+                // This is a shared producer handoff failure, not a slow client.
+                // All audio consumers must renegotiate after actual source loss.
                 self.audioFrames.removeAll(keepingCapacity: true)
                 self.audioQueueOverflow = true
             }
@@ -145,7 +145,13 @@ final class H264RTSPServer {
         queue.async {
             self.microphoneEnabled = enabled
             self.microphone.setMicrophoneEnabled(enabled)
-            if !enabled { self.audioFrames.removeAll() }
+            if !enabled {
+                self.deliveryGate.lock()
+                self.audioFrames.removeAll()
+                self.audioQueueOverflow = false
+                self.deliveryGate.unlock()
+                self.clients.values.forEach { $0.pendingAudio.removeAll() }
+            }
         }
     }
 
@@ -241,6 +247,7 @@ final class H264RTSPServer {
         deliveryPending = false; deliveryDropped = false
         audioFrames.removeAll()
         audioDeliveryQueued = false
+        audioQueueOverflow = false
         audioAllowed = false
         latestVideoTimestamp = nil
         deliveryGate.unlock()
@@ -422,7 +429,14 @@ final class H264RTSPServer {
 
     private func updateAudioCapture() {
         let needed = running && clients.values.contains { $0.playing && $0.audioChannel != nil }
-        deliveryGate.lock(); audioAllowed = needed; deliveryGate.unlock()
+        deliveryGate.lock()
+        audioAllowed = needed
+        if !needed {
+            audioFrames.removeAll()
+            audioQueueOverflow = false
+            audioDeliveryQueued = false
+        }
+        deliveryGate.unlock()
         guard needed != audioCaptureRunning else { return }
         audioCaptureRunning = needed
         if needed { microphone.start(microphoneEnabled: microphoneEnabled) }
@@ -440,30 +454,31 @@ final class H264RTSPServer {
             stalled.forEach(remove)
             return
         }
-        guard !audioFrames.isEmpty else {
-            audioDeliveryQueued = false
-            deliveryGate.unlock()
-            return
-        }
-        let targets = clients.filter { $0.value.playing && $0.value.audioChannel != nil }
-        guard !targets.isEmpty else {
-            audioFrames.removeAll(keepingCapacity: true)
-            audioDeliveryQueued = false
-            deliveryGate.unlock()
-            return
-        }
-        guard targets.values.allSatisfy({ !$0.audioSending }) else {
-            audioDeliveryQueued = false
-            deliveryGate.unlock()
-            return
-        }
-        let frame = audioFrames.removeFirst()
+        let frames = audioFrames
+        audioFrames.removeAll(keepingCapacity: true)
         audioDeliveryQueued = false
         deliveryGate.unlock()
-        guard running else { return }
+        guard running, !frames.isEmpty else { return }
+        let available = frames.filter { microphoneEnabled || $0.silent }
+        let targets = clients.filter { $0.value.playing && $0.value.audioChannel != nil }
         for (id, client) in targets {
-            guard let channel = client.audioChannel,
-                  microphoneEnabled || frame.silent else { continue }
+            // Each client has its own FIFO. One stalled TCP send must not hold
+            // back the healthy clients or force them all to reconnect.
+            guard client.pendingAudio.count + available.count <= 32 else {
+                remove(id)
+                continue
+            }
+            client.pendingAudio.append(contentsOf: available)
+            sendNextAudio(id, client: client)
+        }
+    }
+
+    private func sendNextAudio(_ id: UUID, client: Client) {
+            guard running, clients[id] === client, client.playing,
+                  !client.audioSending, let channel = client.audioChannel else { return }
+            if !microphoneEnabled { client.pendingAudio.removeAll { !$0.silent } }
+            guard !client.pendingAudio.isEmpty else { return }
+            let frame = client.pendingAudio.removeFirst()
             let packet = RTPAAC.packetize(frame.data, sequence: &client.audioSequence,
                                           timestamp: frame.timestamp, ssrc: audioSSRC, channel: channel)
             client.audioPackets &+= 1
@@ -477,13 +492,8 @@ final class H264RTSPServer {
                     self.remove(id); return
                 }
                 client.audioSending = false; client.audioSendStarted = nil; client.lastProgress = now
-                self.deliveryGate.lock()
-                let moreAudio = self.audioAllowed && !self.audioFrames.isEmpty && !self.audioDeliveryQueued
-                if moreAudio { self.audioDeliveryQueued = true }
-                self.deliveryGate.unlock()
-                if moreAudio { self.queue.async { self.sendAudioFrames() } }
+                self.sendNextAudio(id, client: client)
             })
-        }
     }
 
     private func remove(_ id: UUID) {
@@ -501,7 +511,8 @@ final class H264RTSPServer {
             // Available TCP buffer space is not queued-byte age or evidence of
             // a stall. It can stay small on a healthy, actively draining socket.
             return now - client.lastProgress > 6 ||
-                RTSPSendDeadline.isExpired(startedAt: client.videoSendStarted, now: now)
+                RTSPSendDeadline.isExpired(startedAt: client.videoSendStarted, now: now) ||
+                RTSPSendDeadline.isExpired(startedAt: client.audioSendStarted, now: now)
         }.map(\.key)
         expired.forEach(remove)
         for (id, client) in clients where client.playing && !client.sending && now - client.lastClockReport >= 1 {
