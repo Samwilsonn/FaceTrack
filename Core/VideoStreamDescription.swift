@@ -1,6 +1,6 @@
 import Foundation
 
-/// The active stream advertises and accepts exactly one H.264 video track.
+/// The active stream supports H.264 video and optional AAC audio.
 enum VideoStreamDescription {
     static func accepts(path: String) -> Bool {
         ["/facepull", "/facepull/trackID=0", "/facepull/trackID=1"].contains(path)
@@ -29,8 +29,12 @@ enum VideoStreamDescription {
         return url.string
     }
 
-    static func sdp(control: String, frameRate: Int = 30, format: Format? = nil) -> String {
+    static func sdp(control: String, frameRate: Int = 30, format: Format? = nil, audioControl: String? = nil) -> String {
         let parameters = format.map { ";\($0.parameters)" } ?? ""
-        return "v=0\r\no=FacePull 0 0 IN IP4 127.0.0.1\r\ns=FacePull\r\nt=0 0\r\na=control:*\r\nm=video 0 RTP/AVP 96\r\nc=IN IP4 0.0.0.0\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\(parameters)\r\na=framerate:\(max(1, frameRate))\r\na=control:\(control)\r\n"
+        var description = "v=0\r\no=FacePull 0 0 IN IP4 127.0.0.1\r\ns=FacePull\r\nt=0 0\r\na=control:*\r\nm=video 0 RTP/AVP 96\r\nc=IN IP4 0.0.0.0\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\(parameters)\r\na=framerate:\(max(1, frameRate))\r\na=control:\(control)\r\n"
+        if let audioControl = audioControl {
+            description += "m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/48000/1\r\na=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;config=1188;constantDuration=1024;SizeLength=13;IndexLength=3;IndexDeltaLength=3\r\na=control:\(audioControl)\r\n"
+        }
+        return description
     }
 }

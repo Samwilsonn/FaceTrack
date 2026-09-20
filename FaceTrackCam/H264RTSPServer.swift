@@ -313,10 +313,9 @@ final class H264RTSPServer {
                 reply(id, cseq: cseq, status: "400 Bad Request"); return
             }
             client.videoControl = videoControl
-            var sdp = VideoStreamDescription.sdp(control: videoControl, frameRate: frameRate, format: videoFormat)
             let audioControl = uri.replacingOccurrences(of: "/facepull?", with: "/facepull/trackID=1?")
             client.audioControl = audioControl
-            sdp += "m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/48000/1\r\na=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;config=1188;constantDuration=1024;SizeLength=13;IndexLength=3;IndexDeltaLength=3\r\na=control:\(audioControl)\r\n"
+            let sdp = VideoStreamDescription.sdp(control: videoControl, frameRate: frameRate, format: videoFormat, audioControl: audioControl)
             reply(id, cseq: cseq, extra: "Content-Base: \(uri)\r\nContent-Type: application/sdp\r\n", body: sdp)
         case "SETUP":
             let transport = lines.first(where: { $0.lowercased().hasPrefix("transport:") })?.lowercased() ?? ""

@@ -4,16 +4,19 @@ import XCTest
 final class VideoStreamDescriptionTests: XCTestCase {
     func testVideoAndAudioAreAdvertised() {
         let control = "rtsp://127.0.0.1:8554/facepull/trackID=0?token=test"
-        let sdp = VideoStreamDescription.sdp(control: control)
+        let audioControl = "rtsp://127.0.0.1:8554/facepull/trackID=1?token=test"
+        let sdp = VideoStreamDescription.sdp(control: control, audioControl: audioControl)
         XCTAssertEqual(sdp.components(separatedBy: "\r\n").filter { $0.hasPrefix("m=") },
                        ["m=video 0 RTP/AVP 96", "m=audio 0 RTP/AVP 97"])
         XCTAssertTrue(sdp.contains("a=rtpmap:96 H264/90000\r\n"))
         XCTAssertTrue(sdp.contains("a=control:\(control)\r\n"))
         XCTAssertTrue(sdp.contains("MPEG4-GENERIC/48000/1"))
-        XCTAssertTrue(sdp.contains("trackID=1"))
+        XCTAssertTrue(sdp.contains("a=control:\(audioControl)\r\n"))
+        XCTAssertEqual(sdp, VideoStreamDescription.sdp(control: control) +
+                       "m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/48000/1\r\na=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;config=1188;constantDuration=1024;SizeLength=13;IndexLength=3;IndexDeltaLength=3\r\na=control:\(audioControl)\r\n")
     }
 
-    func testFormerAudioTrackIsNotAccepted() {
+    func testVideoAndAudioTracksAreAccepted() {
         XCTAssertTrue(VideoStreamDescription.accepts(path: "/facepull"))
         XCTAssertTrue(VideoStreamDescription.accepts(path: "/facepull/trackID=0"))
         XCTAssertTrue(VideoStreamDescription.accepts(path: "/facepull/trackID=1"))
