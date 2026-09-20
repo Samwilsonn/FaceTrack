@@ -52,6 +52,7 @@ final class H264RTSPServer {
     private var audioCaptureRunning = false
     private var audioDeliveryQueued = false
     private var audioFrames: [MicrophoneAAC.Frame] = []
+    private var audioQueueOverflow = false
     private var needsFormat = false
     private var encoderReady = false
     private var generation = 0
@@ -115,7 +116,12 @@ final class H264RTSPServer {
             guard let self else { return }
             self.deliveryGate.lock()
             guard self.audioAllowed else { self.deliveryGate.unlock(); return }
-            if self.audioFrames.count >= 8 { self.audioFrames.removeFirst() }
+            if self.audioFrames.count >= 32 {
+                // Audio must remain contiguous. A stale client is safer to
+                // reconnect than to feed OBS a sequence with missing AAC AUs.
+                self.audioFrames.removeAll(keepingCapacity: true)
+                self.audioQueueOverflow = true
+            }
             self.audioFrames.append(frame)
             guard !self.audioDeliveryQueued else { self.deliveryGate.unlock(); return }
             self.audioDeliveryQueued = true
@@ -425,15 +431,39 @@ final class H264RTSPServer {
 
     private func sendAudioFrames() {
         deliveryGate.lock()
-        let frames = audioFrames
-        audioFrames.removeAll(keepingCapacity: true)
+        if audioQueueOverflow {
+            audioQueueOverflow = false
+            let stalled = clients.filter { $0.value.playing && $0.value.audioChannel != nil }.map(\.key)
+            audioFrames.removeAll(keepingCapacity: true)
+            audioDeliveryQueued = false
+            deliveryGate.unlock()
+            stalled.forEach(remove)
+            return
+        }
+        guard !audioFrames.isEmpty else {
+            audioDeliveryQueued = false
+            deliveryGate.unlock()
+            return
+        }
+        let targets = clients.filter { $0.value.playing && $0.value.audioChannel != nil }
+        guard !targets.isEmpty else {
+            audioFrames.removeAll(keepingCapacity: true)
+            audioDeliveryQueued = false
+            deliveryGate.unlock()
+            return
+        }
+        guard targets.values.allSatisfy({ !$0.audioSending }) else {
+            audioDeliveryQueued = false
+            deliveryGate.unlock()
+            return
+        }
+        let frame = audioFrames.removeFirst()
         audioDeliveryQueued = false
         deliveryGate.unlock()
-        guard !frames.isEmpty, running else { return }
-        for (id, client) in clients where client.playing && client.audioChannel != nil {
-            guard !client.audioSending, let channel = client.audioChannel else { continue }
-            let available = frames.filter { microphoneEnabled || $0.silent }
-            guard let frame = available.last else { continue }
+        guard running else { return }
+        for (id, client) in targets {
+            guard let channel = client.audioChannel,
+                  microphoneEnabled || frame.silent else { continue }
             let packet = RTPAAC.packetize(frame.data, sequence: &client.audioSequence,
                                           timestamp: frame.timestamp, ssrc: audioSSRC, channel: channel)
             client.audioPackets &+= 1

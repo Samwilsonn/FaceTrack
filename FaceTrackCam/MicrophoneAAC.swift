@@ -16,7 +16,8 @@ final class MicrophoneAAC {
 
     private let queue = DispatchQueue(label: "facepull.aac", qos: .userInitiated)
     private let admission = NSLock()
-    private var pending = false
+    private var pending = 0
+    private var inputGap = false
     private var generation = 0
     private var engine: AVAudioEngine?
     private var converter: AVAudioConverter?
@@ -31,6 +32,7 @@ final class MicrophoneAAC {
     private var silenceTimer: DispatchSourceTimer?
     private var lastEmittedTimestamp: UInt32?
     private var compressedBuffer: AVAudioCompressedBuffer?
+    private let maxPendingBuffers = 4
     private var voiceProcessingEnabled = false
     private var automaticGainControlEnabled = false
 
@@ -139,7 +141,8 @@ final class MicrophoneAAC {
     private func stopCapture() {
         admission.lock()
         generation &+= 1
-        pending = false
+        pending = 0
+        inputGap = false
         admission.unlock()
         if let engine {
             engine.inputNode.removeTap(onBus: 0)
@@ -153,8 +156,15 @@ final class MicrophoneAAC {
 
     private func accept(_ buffer: AVAudioPCMBuffer, time: AVAudioTime, generation: Int) {
         admission.lock()
-        guard self.generation == generation, !pending else { admission.unlock(); return }
-        pending = true
+        guard self.generation == generation else { admission.unlock(); return }
+        guard pending < maxPendingBuffers else {
+            // Never let a slow AAC encode create an unbounded queue. The next
+            // encoded frame will insert cached silence for this discontinuity.
+            inputGap = true
+            admission.unlock()
+            return
+        }
+        pending += 1
         admission.unlock()
         guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength),
               let source = buffer.floatChannelData, let destination = copy.floatChannelData else {
@@ -176,12 +186,16 @@ final class MicrophoneAAC {
 
     private func release(generation: Int) {
         admission.lock()
-        if self.generation == generation { pending = false }
+        if self.generation == generation { pending = max(0, pending - 1) }
         admission.unlock()
     }
 
     private func encode(_ pcm: AVAudioPCMBuffer, timestamp: UInt32, generation: Int) {
         guard running, enabled, self.generation == generation, let converter, let compressed = compressedBuffer else { return }
+        admission.lock()
+        let hadInputGap = inputGap
+        inputGap = false
+        admission.unlock()
         var supplied = false
         // A resampler can produce more than one AAC access unit from one tap.
         // Drain it so the converter cannot accumulate old microphone samples.
@@ -210,6 +224,14 @@ final class MicrophoneAAC {
             if !hasTimestamp || Int32(bitPattern: timestamp &- nextTimestamp) > 12_000 {
                 nextTimestamp = timestamp
                 hasTimestamp = true
+            }
+            if hadInputGap, let silence, framesPerPacket > 0 {
+                var missing = Int64(Int32(bitPattern: timestamp &- nextTimestamp)) / Int64(framesPerPacket)
+                while missing > 0 && missing < 48 {
+                    emit(silence, timestamp: nextTimestamp, silent: true)
+                    nextTimestamp &+= framesPerPacket
+                    missing -= 1
+                }
             }
             let data = Data(bytes: compressed.data.advanced(by: offset), count: size)
             awaitingLive = false
@@ -272,4 +294,3 @@ final class MicrophoneAAC {
         return nil
     }
 }
-
